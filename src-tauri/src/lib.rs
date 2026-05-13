@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod providers;
 pub mod scanner;
+pub mod tools;
 
 use tracing_subscriber::EnvFilter;
 

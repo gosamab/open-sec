@@ -29,6 +29,6 @@ export async function setAnthropicKey(key: string): Promise<void> {
 	return invoke<void>('set_anthropic_key', { key });
 }
 
-export async function scanFile(path: string): Promise<Finding[]> {
-	return invoke<Finding[]>('scan_file', { path });
+export async function scanFile(path: string, scanRoot?: string): Promise<Finding[]> {
+	return invoke<Finding[]>('scan_file', { path, scanRoot: scanRoot ?? null });
 }

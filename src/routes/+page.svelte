@@ -15,6 +15,7 @@
 	} from '$lib/ipc';
 
 	let filePath = $state('');
+	let scopeRoot = $state('');
 	let scanning = $state(false);
 	let findings = $state<Finding[]>([]);
 	let error = $state<string | null>(null);
@@ -27,13 +28,31 @@
 		keyConfigured = await hasAnthropicKey();
 	});
 
+	function parentDir(p: string): string {
+		const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+		return idx > 0 ? p.slice(0, idx) : p;
+	}
+
 	async function pickFile() {
 		const picked = await open({
 			multiple: false,
 			directory: false,
 			title: 'Choose a source file to scan'
 		});
-		if (typeof picked === 'string') filePath = picked;
+		if (typeof picked === 'string') {
+			filePath = picked;
+			// Default scope to the file's parent dir if the user hasn't set one.
+			if (!scopeRoot) scopeRoot = parentDir(picked);
+		}
+	}
+
+	async function pickScope() {
+		const picked = await open({
+			multiple: false,
+			directory: true,
+			title: 'Choose scope root for tool calls'
+		});
+		if (typeof picked === 'string') scopeRoot = picked;
 	}
 
 	async function runScan() {
@@ -42,7 +61,8 @@
 		error = null;
 		findings = [];
 		try {
-			findings = await scanFile(filePath);
+			const root = scopeRoot || parentDir(filePath);
+			findings = await scanFile(filePath, root);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -94,7 +114,7 @@
 	<header class="space-y-1">
 		<h1 class="text-3xl font-semibold tracking-tight">open-sec</h1>
 		<p class="text-muted-foreground text-sm">
-			Local-first security code scanner. Single-file mode — Step 3.
+			Local-first security code scanner. Single file + tool-use agent — Step 4.
 		</p>
 	</header>
 
@@ -121,20 +141,38 @@
 		</Card.Root>
 	{/if}
 
-	<div class="flex flex-col gap-2">
-		<label for="path" class="text-sm font-medium">File to scan</label>
-		<div class="flex gap-2">
-			<Input
-				id="path"
-				bind:value={filePath}
-				placeholder="/path/to/file.ts"
-				spellcheck={false}
-			/>
-			<Button variant="outline" onclick={pickFile}>Pick…</Button>
-			<Button onclick={runScan} disabled={scanning || !filePath}>
-				{scanning ? 'Scanning…' : 'Scan'}
-			</Button>
+	<div class="flex flex-col gap-3">
+		<div class="flex flex-col gap-1">
+			<label for="path" class="text-sm font-medium">File to scan</label>
+			<div class="flex gap-2">
+				<Input
+					id="path"
+					bind:value={filePath}
+					placeholder="/path/to/file.ts"
+					spellcheck={false}
+				/>
+				<Button variant="outline" onclick={pickFile}>Pick…</Button>
+			</div>
 		</div>
+
+		<div class="flex flex-col gap-1">
+			<label for="scope" class="text-sm font-medium">
+				Scope (tools can only read files inside this folder)
+			</label>
+			<div class="flex gap-2">
+				<Input
+					id="scope"
+					bind:value={scopeRoot}
+					placeholder="defaults to the file's parent directory"
+					spellcheck={false}
+				/>
+				<Button variant="outline" onclick={pickScope}>Pick…</Button>
+			</div>
+		</div>
+
+		<Button onclick={runScan} disabled={scanning || !filePath} class="self-start">
+			{scanning ? 'Scanning…' : 'Scan'}
+		</Button>
 	</div>
 
 	{#if error}

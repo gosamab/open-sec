@@ -1,0 +1,56 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE / editor
+.idea/
+.zed/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+# Agent harness state
+.claude/
+
+# Local config overrides
+config.local.toml
+
+# Coverage / test output
+coverage/
+*.lcov
+
+# Local scan data (when we wire up SQLite for dev)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

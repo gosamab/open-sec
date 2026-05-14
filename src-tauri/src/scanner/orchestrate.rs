@@ -13,17 +13,86 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{info, instrument, warn};
 
-use crate::providers::Provider;
+use crate::providers::counting::{diff, CountingProvider, UsageCounter};
+use crate::providers::{Provider, Usage};
 use crate::scanner::detect::{self, scan_with_tools};
 use crate::scanner::ingest::{self, Candidate, WalkResult};
 use crate::scanner::patch::{self, propose_many, Patch};
 use crate::scanner::triage::{self, triage_many, Priority, TriagedFile};
 use crate::scanner::verify::{self, verify_many, VerifiedFinding};
 use crate::scanner::{Finding, FindingKind};
+
+/// Stage-level events emitted as the pipeline progresses. The UI subscribes
+/// to these to drive live updates without waiting for the full scan to
+/// finish.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScanEvent {
+    Started {
+        root: PathBuf,
+    },
+    IngestComplete {
+        walk: WalkResult,
+    },
+    TriageComplete {
+        triaged: Vec<TriagedFile>,
+    },
+    /// One detected file's findings landed. Emitted as each file finishes
+    /// so the UI can populate the left pane progressively.
+    DetectFileComplete {
+        rel_path: String,
+        findings: Vec<Finding>,
+    },
+    /// Detect failed on a file (read error, model error, JSON parse failure,
+    /// tool-iteration cap exceeded). The UI surfaces this as a red badge so
+    /// "scan errored" doesn't look identical to "scan returned 0 findings".
+    DetectFileErrored {
+        rel_path: String,
+        error: String,
+    },
+    DetectComplete {
+        total: usize,
+    },
+    VerifyComplete {
+        verified: Vec<VerifiedFinding>,
+    },
+    PatchComplete {
+        patches: Vec<Patch>,
+    },
+    /// Running token totals after each stage. Emitted alongside the stage's
+    /// completion event so the UI can show a live cost indicator.
+    UsageUpdate {
+        usage: StageUsage,
+    },
+}
+
+/// Token usage broken down by stage, plus the rolling total. Each per-stage
+/// `Usage` is the delta attributable to that stage's API calls — useful
+/// for understanding where the cost lands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageUsage {
+    pub triage: Usage,
+    pub detect: Usage,
+    pub verify: Usage,
+    pub patch: Usage,
+    pub total: Usage,
+}
+
+/// Sender used to ferry `ScanEvent`s out of the pipeline. The `Option`
+/// makes event emission opt-in — CLI usage can pass `None` and skip the
+/// extra plumbing.
+pub type EventSender = mpsc::UnboundedSender<ScanEvent>;
+
+fn emit(events: Option<&EventSender>, ev: ScanEvent) {
+    if let Some(tx) = events {
+        // Drop on send failure — the receiver simply went away.
+        let _ = tx.send(ev);
+    }
+}
 
 /// Tuning knobs for a scan. Defaults follow the locked decisions in
 /// CLAUDE.md; callers can override per-stage if needed.
@@ -74,17 +143,34 @@ pub struct ScanResult {
     pub findings_by_file: Vec<FileFindings>,
     pub verified: Vec<VerifiedFinding>,
     pub patches: Vec<Patch>,
+    pub usage: StageUsage,
 }
 
 /// Run the full pipeline on a folder. Stages execute sequentially (so each
 /// has the full output of the previous), but work *within* each stage is
 /// parallelized under per-stage semaphores.
-#[instrument(skip(provider, config), fields(root = %root.display()))]
+///
+/// `events`, when provided, receives a `ScanEvent` at each stage boundary
+/// (and once per file during detect). Send failures are silently dropped —
+/// the receiver going away does not abort the scan.
+#[instrument(skip(provider, config, events), fields(root = %root.display()))]
 pub async fn run_scan(
     root: PathBuf,
     provider: Arc<dyn Provider>,
     config: &ScanConfig,
+    events: Option<EventSender>,
 ) -> Result<ScanResult> {
+    let events = events.as_ref();
+    emit(events, ScanEvent::Started { root: root.clone() });
+
+    // Wrap the inbound provider so every `generate()` accrues into a shared
+    // counter. We snapshot the counter at each stage boundary to attribute
+    // tokens per stage.
+    let counter = UsageCounter::new();
+    let provider: Arc<dyn Provider> = Arc::new(CountingProvider::new(provider, counter.clone()));
+    let mut stage_usage = StageUsage::default();
+    let mut snapshot_before_stage = counter.snapshot();
+
     // ----- 1. Ingest --------------------------------------------------
     let ingest = ingest::walk(&root).context("walking scan root")?;
     info!(
@@ -98,6 +184,12 @@ pub async fn run_scan(
             "scanning over 1000 files — this will take a while and cost real money"
         );
     }
+    emit(
+        events,
+        ScanEvent::IngestComplete {
+            walk: ingest.clone(),
+        },
+    );
 
     if ingest.candidates.is_empty() {
         return Ok(ScanResult {
@@ -107,6 +199,7 @@ pub async fn run_scan(
             findings_by_file: Vec::new(),
             verified: Vec::new(),
             patches: Vec::new(),
+            usage: stage_usage,
         });
     }
 
@@ -128,8 +221,26 @@ pub async fn run_scan(
         keepers = to_detect.len(),
         "triage complete"
     );
+    emit(
+        events,
+        ScanEvent::TriageComplete {
+            triaged: triaged.clone(),
+        },
+    );
+    {
+        let after = counter.snapshot();
+        stage_usage.triage = diff(&after, &snapshot_before_stage);
+        stage_usage.total = after.clone();
+        snapshot_before_stage = after;
+        emit(
+            events,
+            ScanEvent::UsageUpdate {
+                usage: stage_usage.clone(),
+            },
+        );
+    }
 
-    // ----- 3. Detect (parallel under Semaphore) -----------------------
+    // ----- 3. Detect (parallel under Semaphore, streaming per-file) ---
     let detect_permits = Arc::new(Semaphore::new(config.detect_concurrency.max(1)));
     let mut set: JoinSet<DetectOutcome> = JoinSet::new();
     let detect_root = Arc::new(root.clone());
@@ -162,6 +273,13 @@ pub async fn run_scan(
         if let Ok(outcome) = joined {
             match outcome {
                 DetectOutcome::Ok { cand, findings } => {
+                    emit(
+                        events,
+                        ScanEvent::DetectFileComplete {
+                            rel_path: cand.rel_path.clone(),
+                            findings: findings.clone(),
+                        },
+                    );
                     all_findings.extend(findings.iter().cloned());
                     findings_by_file.push(FileFindings {
                         path: cand.path,
@@ -171,6 +289,13 @@ pub async fn run_scan(
                 }
                 DetectOutcome::Error { cand, error } => {
                     warn!(file = %cand.rel_path, error = %error, "detect errored; skipping file");
+                    emit(
+                        events,
+                        ScanEvent::DetectFileErrored {
+                            rel_path: cand.rel_path,
+                            error,
+                        },
+                    );
                 }
             }
         }
@@ -181,6 +306,24 @@ pub async fn run_scan(
         findings = all_findings.len(),
         "detect complete"
     );
+    emit(
+        events,
+        ScanEvent::DetectComplete {
+            total: all_findings.len(),
+        },
+    );
+    {
+        let after = counter.snapshot();
+        stage_usage.detect = diff(&after, &snapshot_before_stage);
+        stage_usage.total = after.clone();
+        snapshot_before_stage = after;
+        emit(
+            events,
+            ScanEvent::UsageUpdate {
+                usage: stage_usage.clone(),
+            },
+        );
+    }
 
     // ----- 4. Verify --------------------------------------------------
     let verified = if all_findings.is_empty() {
@@ -207,6 +350,24 @@ pub async fn run_scan(
         patchable = kept_or_hardening,
         "verify complete"
     );
+    emit(
+        events,
+        ScanEvent::VerifyComplete {
+            verified: verified.clone(),
+        },
+    );
+    {
+        let after = counter.snapshot();
+        stage_usage.verify = diff(&after, &snapshot_before_stage);
+        stage_usage.total = after.clone();
+        snapshot_before_stage = after;
+        emit(
+            events,
+            ScanEvent::UsageUpdate {
+                usage: stage_usage.clone(),
+            },
+        );
+    }
 
     // ----- 5. Patch ---------------------------------------------------
     let patches = if kept_or_hardening == 0 {
@@ -222,6 +383,23 @@ pub async fn run_scan(
         .await
     };
     info!(count = patches.len(), "patch complete");
+    emit(
+        events,
+        ScanEvent::PatchComplete {
+            patches: patches.clone(),
+        },
+    );
+    {
+        let after = counter.snapshot();
+        stage_usage.patch = diff(&after, &snapshot_before_stage);
+        stage_usage.total = after;
+        emit(
+            events,
+            ScanEvent::UsageUpdate {
+                usage: stage_usage.clone(),
+            },
+        );
+    }
 
     Ok(ScanResult {
         root,
@@ -230,6 +408,7 @@ pub async fn run_scan(
         findings_by_file,
         verified,
         patches,
+        usage: stage_usage,
     })
 }
 

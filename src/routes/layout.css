@@ -121,3 +121,39 @@
 		@apply bg-background text-foreground;
 	}
 }
+
+/* Markdown rendering inside finding-detail prose.
+   Scoped to the `.md` class so it doesn't leak into the rest of the UI. */
+.md code {
+	@apply bg-muted/70 text-foreground rounded px-1 py-[0.05rem] font-mono text-[0.85em];
+}
+.md pre {
+	@apply bg-muted/40 border-border my-2 overflow-auto rounded-md border p-3 font-mono text-xs leading-relaxed;
+}
+.md pre code {
+	@apply bg-transparent p-0;
+}
+.md strong {
+	@apply font-semibold;
+}
+.md em {
+	@apply italic;
+}
+.md a {
+	@apply text-blue-600 underline underline-offset-2 dark:text-blue-400;
+}
+.md ul {
+	@apply my-1 list-disc space-y-0.5 pl-5;
+}
+.md ol {
+	@apply my-1 list-decimal space-y-0.5 pl-5;
+}
+.md p {
+	@apply my-1;
+}
+.md p:first-child {
+	@apply mt-0;
+}
+.md p:last-child {
+	@apply mb-0;
+}

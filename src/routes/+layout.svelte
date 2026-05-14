@@ -1,8 +1,14 @@
 <script lang="ts">
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import { theme } from '$lib/theme.svelte';
 
 	let { children } = $props();
+
+	// Mirror theme state onto <html class="dark"> whenever it changes.
+	$effect(() => {
+		if (typeof document !== 'undefined') theme.apply(document);
+	});
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>

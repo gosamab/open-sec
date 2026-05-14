@@ -147,9 +147,9 @@ open-sec/
 5. ✅ Triage pass (Haiku gate, 4 priority buckets, 10/10 fixture calibration)
 6. ✅ Verification pass (Opus + tools, structured exploit schema, 5/5 textbook vulns KEPT, adversarial finding DROPPED)
 7. ✅ Patch generation (Sonnet + tools, exact + fuzzy locate, unified diffs via `diffy`, hardening also patched)
-8. ⏳ Full pipeline + UI (three-pane workspace)
+8. ✅ Full pipeline + UI (three-pane workspace)
    - ✅ 8a. Orchestrator + `pipeline_cli` (end-to-end: ingest → triage → detect → verify → patch)
-   - 8b. SvelteKit three-pane UI on top of the orchestrator
+   - ✅ 8b. SvelteKit three-pane UI with live event streaming (folder picker, files/findings/detail panes, progressive updates as triage→detect→verify→patch land)
 9. Persistence (SQLite scans/findings)
 
 ## Calibration log
@@ -333,3 +333,44 @@ declaring a prompt change shipped.
 - Out of scope here (deferred to UI step): budget caps, >1000-file
   confirmation, cancellation that "keeps partial findings". The
   >1000 case currently just emits a `tracing` warn.
+
+### Step 8b: three-pane SvelteKit workspace
+- Added `ScanEvent` enum in `orchestrate.rs` and refactored `run_scan` to
+  take an optional `mpsc::UnboundedSender<ScanEvent>`. Events emitted:
+  `Started`, `IngestComplete(walk)`, `TriageComplete(triaged)`,
+  `DetectFileComplete(rel_path, findings)` per file, `DetectComplete`,
+  `VerifyComplete(verified)`, `PatchComplete(patches)`. `pipeline_cli`
+  passes `None` (unchanged behaviour); the Tauri command threads an mpsc
+  sender into the scan and forwards events via `AppHandle::emit("scan:event")`.
+- New Tauri command `run_pipeline(root)` returns the full `ScanResult` and
+  streams events while it works.
+- `src/lib/ipc.ts` mirrors every Rust type — `Finding`, `Candidate`,
+  `WalkResult`, `TriagedFile`, `VerifiedFinding`, `Patch`, `Located`,
+  `Exploit`, `ScanResult`, `ScanEvent`. `listenScanEvents(cb)` returns an
+  `UnlistenFn` for cleanup. Strict types, no `any`.
+- `+page.svelte` replaces the Step 4 single-file UI with a three-pane
+  workspace:
+  - Topbar with folder picker + Scan button + live stage status string
+  - **Left pane**: file list with severity dot per file (top severity) +
+    finding count. "All files" entry at top selects the un-filtered view.
+    Triage funnel badges at the bottom once triage lands.
+  - **Middle pane**: findings list. Each entry shows severity badge, CWE,
+    title, file:lines. Verification badge transitions from `verifying…`
+    (animated pulse) → `kept` / `dropped` / `hardening` as
+    `VerifyComplete` lands. Click to focus.
+  - **Right pane**: detail view of the selected finding — description,
+    data flow, verifier verdict + structured exploit (request/payload/
+    expected_effect), and the patch with a coloured unified-diff block
+    (+/- line highlighting via Tailwind classes; Shiki is deferred).
+    Empty selection → summary dashboard with ingest/triage/findings/
+    patches counts plus an expandable list of pre-triage skips.
+- API key gate stays at the top when no key is configured.
+- Live updates use Svelte 5 runes (`$state`, `$derived.by`) plus reactive
+  `Map`s for `findingsByFile` / `verdictById` / `patchById`. Reassigning
+  the Map (rather than mutating) triggers reactivity correctly.
+- `bun run check` green, `bun run build` green, 66 Rust unit tests still
+  green.
+- Try it: `bun run tauri dev`, pick `fixtures/vulnerable`, hit Scan.
+  Files populate as detect lands each file (~3s each, parallel 4); badges
+  flip from `verifying…` to `kept`/`hardening` as verify lands; patches
+  appear in the right pane on selection.

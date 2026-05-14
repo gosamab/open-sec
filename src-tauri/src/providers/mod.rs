@@ -1,6 +1,7 @@
 #![allow(dead_code)] // wired up incrementally as Step 3+ land
 
 pub mod anthropic;
+pub mod counting;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

@@ -75,7 +75,7 @@ async fn run(root: PathBuf, json_out: bool) -> anyhow::Result<()> {
     let config = ScanConfig::default();
 
     eprintln!(">>> scanning {}", root.display());
-    let result = run_scan(root, provider, &config).await?;
+    let result = run_scan(root, provider, &config, None).await?;
 
     print_summary(&result);
 
@@ -156,6 +156,24 @@ fn print_summary(r: &ScanResult) {
     eprintln!(
         "  patch:   {} proposal(s) [exact={exact} fuzzy={fuzzy} not_found={not_found}]",
         r.patches.len()
+    );
+
+    let u = &r.usage;
+    let t = &u.total;
+    eprintln!(
+        "  tokens:  in={} out={} cache_read={} cache_create={}  (triage in/out={}/{} · detect={}/{} · verify={}/{} · patch={}/{})",
+        t.input_tokens,
+        t.output_tokens,
+        t.cache_read_input_tokens,
+        t.cache_creation_input_tokens,
+        u.triage.input_tokens,
+        u.triage.output_tokens,
+        u.detect.input_tokens,
+        u.detect.output_tokens,
+        u.verify.input_tokens,
+        u.verify.output_tokens,
+        u.patch.input_tokens,
+        u.patch.output_tokens,
     );
     eprintln!();
 }

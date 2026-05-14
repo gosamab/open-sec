@@ -1,0 +1,87 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Cancel in-flight runs for the same tag (rare, but harmless to set).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.platform.label }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: macos-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - label: macos-x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform.label }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend deps
+        run: bun install --frozen-lockfile
+
+      - name: Build, sign, notarize, and upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Updater signing key (generated once via `bun tauri signer generate`).
+          # The plugin verifies downloaded updates against the matching pubkey
+          # baked into tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+          # Apple code-signing identity. APPLE_CERTIFICATE is the base64 of a
+          # .p12 export of your Developer ID Application cert; tauri-action
+          # imports it into a temporary keychain for the duration of the job.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+          # Apple notarization. APPLE_PASSWORD is an app-specific password.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Creates the GitHub Release the first job to run; subsequent
+          # matrix jobs append their artifacts to the same release.
+          tagName: ${{ github.ref_name }}
+          releaseName: "Open Security ${{ github.ref_name }}"
+          releaseBody: |
+            See the [CHANGELOG](./CHANGELOG.md) for what's new.
+
+            **macOS:** download the matching `.dmg` for your chip (Apple Silicon → `aarch64`, Intel → `x86_64`), drag to Applications.
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.platform.target }}
+          # Auto-update is disabled for now (see `plugins.updater.active`
+          # in tauri.conf.json). Flip to `true` here + in the conf when you
+          # want CI to emit `latest.json` + signed `.tar.gz` for the
+          # in-app updater.
+          includeUpdaterJson: false

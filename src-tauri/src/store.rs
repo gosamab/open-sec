@@ -29,7 +29,7 @@ use crate::scanner::triage::TriagedFile;
 use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::Finding;
 
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS scans (
@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS triage (
 );
 "#;
 
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS applied_patches (
+    finding_id  TEXT NOT NULL,
+    root        TEXT NOT NULL,
+    file        TEXT NOT NULL,
+    applied_at  INTEGER NOT NULL,
+    PRIMARY KEY (finding_id, root)
+);
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TriageStatus {
@@ -103,6 +113,13 @@ impl TriageStatus {
             other => return Err(anyhow!("unknown triage status: {other}")),
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedPatchRecord {
+    pub finding_id: String,
+    pub file: String,
+    pub applied_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,10 +185,17 @@ impl Store {
         if current < 1 {
             let tx = conn.transaction()?;
             tx.execute_batch(SCHEMA_V1)?;
-            tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            tx.pragma_update(None, "user_version", 1)?;
             tx.commit()?;
         }
-        // Future migrations chain here: if current < 2 { ... }
+        if current < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(SCHEMA_V2)?;
+            tx.pragma_update(None, "user_version", 2)?;
+            tx.commit()?;
+        }
+        // Future migrations chain here: if current < 3 { ... }
+        let _ = CURRENT_SCHEMA_VERSION; // keep compiler honest about the constant being used
         Ok(())
     }
 
@@ -475,6 +499,36 @@ impl Store {
             params![finding_id, root],
         )?;
         Ok(())
+    }
+
+    pub fn record_patch_applied(&self, finding_id: &str, root: &str, file: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO applied_patches (finding_id, root, file, applied_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(finding_id, root) DO UPDATE SET
+                 file = excluded.file,
+                 applied_at = excluded.applied_at",
+            params![finding_id, root, file, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_applied_for_root(&self, root: &str) -> Result<Vec<AppliedPatchRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT finding_id, file, applied_at FROM applied_patches WHERE root = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![root], |row| {
+                Ok(AppliedPatchRecord {
+                    finding_id: row.get(0)?,
+                    file: row.get(1)?,
+                    applied_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Load every triage decision for a root. The returned list is suitable

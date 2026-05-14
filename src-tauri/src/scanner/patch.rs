@@ -144,6 +144,21 @@ fn system_prompt() -> String {
 ///
 /// Both verified vulns and hardening findings flow through here; the caller
 /// is responsible for not calling it on dropped vulns.
+///
+/// `prior_attempts` carries earlier proposals the user has already seen for
+/// the same finding — when non-empty, the prompt asks the model to pick a
+/// structurally different fix from the listed alternatives.
+#[instrument(skip(provider, vf, prior_attempts), fields(file = %vf.finding.file, cwe = %vf.finding.cwe))]
+pub async fn propose_one_with_history(
+    vf: &VerifiedFinding,
+    scan_root: &Path,
+    provider: &dyn Provider,
+    model: &str,
+    prior_attempts: &[PatchProposal],
+) -> Result<Patch> {
+    propose_one_impl(vf, scan_root, provider, model, prior_attempts).await
+}
+
 #[instrument(skip(provider, vf), fields(file = %vf.finding.file, cwe = %vf.finding.cwe))]
 pub async fn propose_one(
     vf: &VerifiedFinding,
@@ -151,13 +166,23 @@ pub async fn propose_one(
     provider: &dyn Provider,
     model: &str,
 ) -> Result<Patch> {
+    propose_one_impl(vf, scan_root, provider, model, &[]).await
+}
+
+async fn propose_one_impl(
+    vf: &VerifiedFinding,
+    scan_root: &Path,
+    provider: &dyn Provider,
+    model: &str,
+    prior_attempts: &[PatchProposal],
+) -> Result<Patch> {
     let canonical_root = tools::sandbox::canonical_root(scan_root)?;
     let focus_path = resolve_focus_path(&canonical_root, &vf.finding.file);
     let source = tokio::fs::read_to_string(&focus_path)
         .await
         .with_context(|| format!("read focus file {}", focus_path.display()))?;
 
-    let initial = build_initial_user_message(&canonical_root, vf, &source)?;
+    let initial = build_initial_user_message(&canonical_root, vf, &source, prior_attempts)?;
     let mut messages: Vec<Message> = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text { text: initial }],
@@ -298,6 +323,7 @@ fn build_initial_user_message(
     canonical_root: &Path,
     vf: &VerifiedFinding,
     source: &str,
+    prior_attempts: &[PatchProposal],
 ) -> Result<String> {
     let mut msg = String::new();
     use std::fmt::Write;
@@ -310,6 +336,25 @@ fn build_initial_user_message(
         writeln!(msg)?;
         writeln!(msg, "Verifier verdict:")?;
         writeln!(msg, "{}", serde_json::to_string_pretty(verdict)?)?;
+    }
+    if !prior_attempts.is_empty() {
+        writeln!(msg)?;
+        writeln!(
+            msg,
+            "PRIOR ATTEMPTS — the user has already seen the following {} proposal(s) and asked for an alternative.",
+            prior_attempts.len()
+        )?;
+        writeln!(
+            msg,
+            "Propose a STRUCTURALLY DIFFERENT fix: pick a different control point (e.g. validate at the boundary instead of escaping at the sink), a different defense mechanism (allowlist vs sanitizer vs typing), or a different scope. Do NOT just reword the same approach with different identifiers. If the previous attempts were all incorrect, address that directly."
+        )?;
+        for (i, p) in prior_attempts.iter().enumerate() {
+            writeln!(msg)?;
+            writeln!(msg, "--- Attempt #{} ---", i + 1)?;
+            writeln!(msg, "Explanation: {}", p.explanation)?;
+            writeln!(msg, "new_block (replacement):")?;
+            writeln!(msg, "{}", p.new_block)?;
+        }
     }
     writeln!(msg)?;
     writeln!(msg, "Focus file with line numbers:")?;

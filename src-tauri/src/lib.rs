@@ -1,6 +1,7 @@
 mod commands;
 pub mod config;
 pub mod error;
+pub mod export;
 pub mod providers;
 pub mod scanner;
 pub mod store;
@@ -24,6 +25,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Open the scan-history DB at <app_data_dir>/open-sec.db. We crash
             // here on failure because nothing downstream works without it.
@@ -46,6 +49,13 @@ pub fn run() {
             commands::scan_file,
             commands::run_pipeline,
             commands::cancel_scan,
+            commands::get_excerpt,
+            commands::apply_patch,
+            commands::regenerate_patch,
+            commands::get_applied_for_root,
+            commands::export_markdown,
+            commands::export_sarif,
+            commands::save_text_file,
             commands::list_scan_groups,
             commands::load_scan,
             commands::delete_scan,

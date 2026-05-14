@@ -107,6 +107,12 @@ pub struct ScanConfig {
     pub detect_model: String,
     pub verify_model: String,
     pub patch_model: String,
+    /// Combined input+output token cap across the whole scan. `None` =
+    /// unlimited. When reached, the orchestrator flips the cancel flag at
+    /// the next stage boundary and the scan terminates with whatever it had
+    /// collected.
+    #[serde(default)]
+    pub budget_total_tokens: Option<u32>,
 }
 
 impl Default for ScanConfig {
@@ -120,6 +126,7 @@ impl Default for ScanConfig {
             detect_model: detect::DEFAULT_DETECT_MODEL.into(),
             verify_model: verify::DEFAULT_VERIFY_MODEL.into(),
             patch_model: patch::DEFAULT_PATCH_MODEL.into(),
+            budget_total_tokens: None,
         }
     }
 }
@@ -179,6 +186,17 @@ pub async fn run_scan(
     let mut snapshot_before_stage = counter.snapshot();
 
     let is_cancelled = || cancel.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
+    let trip_budget_if_over = |total: &Usage| {
+        if let (Some(cap), Some(flag)) = (config.budget_total_tokens, cancel.as_ref()) {
+            let used = total.input_tokens + total.output_tokens;
+            if used >= cap {
+                if !flag.load(Ordering::Relaxed) {
+                    warn!(used, cap, "token budget exceeded — cancelling scan");
+                }
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    };
 
     // ----- 1. Ingest --------------------------------------------------
     let ingest = ingest::walk(&root).context("walking scan root")?;
@@ -247,6 +265,7 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        trip_budget_if_over(&stage_usage.total);
     }
 
     if is_cancelled() {
@@ -345,6 +364,7 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        trip_budget_if_over(&stage_usage.total);
     }
 
     // ----- 4. Verify --------------------------------------------------
@@ -392,6 +412,7 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        trip_budget_if_over(&stage_usage.total);
     }
 
     // ----- 5. Patch ---------------------------------------------------
@@ -427,6 +448,7 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        trip_budget_if_over(&stage_usage.total);
     }
 
     Ok(ScanResult {

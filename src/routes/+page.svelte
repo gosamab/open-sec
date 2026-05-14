@@ -6,13 +6,23 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Card from '$lib/components/ui/card';
 	import Launcher from '$lib/components/Launcher.svelte';
+	import Settings from '$lib/components/Settings.svelte';
 	import { renderMd, renderInlineMd } from '$lib/markdown';
+	import { asScanConfig, settings } from '$lib/settings.svelte';
+	import { highlightCode, highlightDiff } from '$lib/shiki.svelte';
 	import { theme } from '$lib/theme.svelte';
 	import {
 		EMPTY_STAGE_USAGE,
+		applyPatch,
 		cancelScan,
 		clearTriage,
+		exportMarkdown,
+		exportSarif,
+		saveTextFile,
+		getAppliedForRoot,
+		getExcerpt,
 		getTriageForRoot,
+		regeneratePatch,
 		hasAnthropicKey,
 		listenScanEvents,
 		listScanGroups,
@@ -20,9 +30,11 @@
 		runPipeline,
 		setAnthropicKey,
 		setTriage,
+		type Excerpt,
 		type Finding,
 		type FileFindings,
 		type Patch,
+		type PatchProposal,
 		type Priority,
 		type ScanGroup,
 		type ScanResult,
@@ -64,6 +76,101 @@
 	/** Triage decisions keyed by finding_id (scoped to the current root). */
 	let triageById = $state<Map<string, TriageRecord>>(new Map());
 	let triageBusy = $state(false);
+
+	/** Findings whose patch has been applied to disk in this session. Not
+	 *  persisted — re-scanning the same root will produce a clean slate (and
+	 *  hopefully not re-emit the same finding). */
+	let appliedPatchIds = $state<Set<string>>(new Set());
+	let applyBusy = $state(false);
+	let applyError = $state<string | null>(null);
+
+	/** Per-finding patch history. patchById holds the *currently displayed*
+	 *  patch; this map keeps every variant the user has seen so they can flip
+	 *  between alternatives. */
+	let patchHistoryById = $state<Map<string, Patch[]>>(new Map());
+	let regenBusy = $state(false);
+	let regenError = $state<string | null>(null);
+
+	function patchHistoryFor(findingId: string): Patch[] {
+		const history = patchHistoryById.get(findingId);
+		if (history && history.length > 0) return history;
+		const current = patchById.get(findingId);
+		return current ? [current] : [];
+	}
+
+	let selectedPatchVariants = $derived.by(() =>
+		selectedFinding ? patchHistoryFor(selectedFinding.id) : []
+	);
+	let selectedPatchVariantIdx = $derived.by(() => {
+		if (!selectedFinding || !selectedPatch) return 0;
+		const list = selectedPatchVariants;
+		const idx = list.findIndex((p) => p === selectedPatch);
+		return idx < 0 ? Math.max(0, list.length - 1) : idx;
+	});
+
+	function selectPatchVariant(idx: number) {
+		if (!selectedFinding) return;
+		const list = patchHistoryFor(selectedFinding.id);
+		const v = list[idx];
+		if (!v) return;
+		const next = new Map(patchById);
+		next.set(selectedFinding.id, v);
+		patchById = next;
+	}
+
+	async function regenerateAlternative() {
+		if (!selectedFinding || !root) return;
+		const verified = verifiedFor(selectedFinding);
+		if (!verified) return;
+		regenBusy = true;
+		regenError = null;
+		try {
+			const existing = patchHistoryFor(selectedFinding.id);
+			const priors = existing.map((p) => p.proposal);
+			const newPatch = await regeneratePatch(root, verified, priors);
+			const history = [...existing, newPatch];
+			const histMap = new Map(patchHistoryById);
+			histMap.set(selectedFinding.id, history);
+			patchHistoryById = histMap;
+			const pbi = new Map(patchById);
+			pbi.set(selectedFinding.id, newPatch);
+			patchById = pbi;
+		} catch (e) {
+			regenError = e instanceof Error ? e.message : String(e);
+		} finally {
+			regenBusy = false;
+		}
+	}
+
+	function verifiedFor(f: Finding): VerifiedFinding | null {
+		// Find the VerifiedFinding wrapper for a given Finding, from the
+		// session's verified array. Required by regeneratePatch.
+		if (!scanResult) return { finding: f, verdict: verdictById.get(f.id) ?? null };
+		const v = scanResult.verified.find((x) => x.finding.id === f.id);
+		return v ?? { finding: f, verdict: verdictById.get(f.id) ?? null };
+	}
+
+	async function applySelectedPatch() {
+		if (!selectedPatch || !selectedFinding) return;
+		applyBusy = true;
+		applyError = null;
+		try {
+			await applyPatch(
+				selectedFinding.id,
+				root,
+				selectedPatch.proposal.file,
+				selectedPatch.proposal.old_block,
+				selectedPatch.proposal.new_block
+			);
+			const next = new Set(appliedPatchIds);
+			next.add(selectedFinding.id);
+			appliedPatchIds = next;
+		} catch (e) {
+			applyError = e instanceof Error ? e.message : String(e);
+		} finally {
+			applyBusy = false;
+		}
+	}
 	let dismissDraftFor = $state<string | null>(null);
 	let dismissReason = $state('');
 	let hideDismissed = $state(true);
@@ -77,6 +184,9 @@
 	let resultRoot = $state<string | null>(null);
 
 	let unlisten: UnlistenFn | null = null;
+	let settingsOpen = $state(false);
+	let exportMenuOpen = $state(false);
+	let exportMenuRef = $state<HTMLDivElement | null>(null);
 
 	// ---------- lifecycle ------------------------------------------------
 	onMount(async () => {
@@ -156,16 +266,85 @@
 		selectedFile = null;
 		selectedFindingId = null;
 		try {
-			scanResult = await runPipeline(root);
+			scanResult = await runPipeline(root, asScanConfig(settings.value));
 			resultRoot = root;
 			stage = cancelling ? 'cancelled' : 'done';
 			await reloadTriageForCurrentRoot();
+			await reloadAppliedForCurrentRoot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			stage = 'error';
 		} finally {
 			scanning = false;
 			cancelling = false;
+		}
+	}
+
+	$effect(() => {
+		if (!exportMenuOpen) return;
+		const onDoc = (e: MouseEvent) => {
+			if (exportMenuRef && !exportMenuRef.contains(e.target as Node)) {
+				exportMenuOpen = false;
+			}
+		};
+		const onEsc = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') exportMenuOpen = false;
+		};
+		document.addEventListener('mousedown', onDoc);
+		document.addEventListener('keydown', onEsc);
+		return () => {
+			document.removeEventListener('mousedown', onDoc);
+			document.removeEventListener('keydown', onEsc);
+		};
+	});
+
+	async function exportPdf() {
+		if (!root) return;
+		try {
+			const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+			const existing = await WebviewWindow.getByLabel('report');
+			const url = `/report?root=${encodeURIComponent(root)}&auto=1`;
+			if (existing) {
+				existing.setFocus();
+				return;
+			}
+			const win = new WebviewWindow('report', {
+				url,
+				title: 'open-sec · report',
+				width: 900,
+				height: 1100,
+				resizable: true
+			});
+			win.once('tauri://error', (e) => {
+				error = `failed to open report window: ${JSON.stringify(e.payload)}`;
+			});
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function exportTo(format: 'markdown' | 'sarif') {
+		if (!root) return;
+		try {
+			const content =
+				format === 'markdown' ? await exportMarkdown(root) : await exportSarif(root);
+			const { save } = await import('@tauri-apps/plugin-dialog');
+			const ext = format === 'markdown' ? 'md' : 'sarif.json';
+			const stem = root.split(/[\\/]/).pop() || 'scan';
+			const target = await save({
+				title: format === 'markdown' ? 'Save markdown report' : 'Save SARIF report',
+				defaultPath: `${stem}-open-sec.${ext}`,
+				filters: [
+					{
+						name: format === 'markdown' ? 'Markdown' : 'SARIF',
+						extensions: format === 'markdown' ? ['md'] : ['json', 'sarif']
+					}
+				]
+			});
+			if (typeof target !== 'string') return;
+			await saveTextFile(target, content);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
@@ -235,6 +414,18 @@
 		}
 	}
 
+	async function reloadAppliedForCurrentRoot() {
+		if (!root) return;
+		try {
+			const rs = await getAppliedForRoot(root);
+			const s = new Set<string>();
+			for (const r of rs) s.add(r.finding_id);
+			appliedPatchIds = s;
+		} catch (e) {
+			console.error('getAppliedForRoot failed', e);
+		}
+	}
+
 	/** + New project: just enter workspace with the root set. No scan triggered. */
 	function openProjectFresh(path: string) {
 		resetWorkspace();
@@ -251,6 +442,7 @@
 			const r = await loadScan(group.latest_scan_id);
 			hydrateFromScanResult(r);
 			await reloadTriageForCurrentRoot();
+			await reloadAppliedForCurrentRoot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -937,6 +1129,69 @@
 	let dataFlowSteps = $derived.by(() =>
 		selectedFinding ? parseDataFlow(selectedFinding.data_flow) : []
 	);
+
+	/** Shiki-highlighted HTML for the currently-selected patch diff, kept in
+	 *  sync via an effect (shiki is async — we can't $derive directly on it). */
+	let diffHtml = $state<string | null>(null);
+	$effect(() => {
+		const diff = selectedPatch?.diff ?? null;
+		if (!diff) {
+			diffHtml = null;
+			return;
+		}
+		let cancelled = false;
+		// Trigger re-highlight on theme change too (CSS handles the swap, but
+		// we want the effect to be reactive on theme so any future per-theme
+		// processing kicks in).
+		void theme.value;
+		highlightDiff(diff)
+			.then((html) => {
+				if (!cancelled) diffHtml = html;
+			})
+			.catch((e) => {
+				console.error('highlightDiff failed', e);
+				if (!cancelled) diffHtml = null;
+			});
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	/** Code excerpt (enclosing function/class or ±N line window) for the
+	 *  currently-selected finding, fetched on demand from the Rust side
+	 *  via tree-sitter and highlighted with Shiki. */
+	let excerpt = $state<Excerpt | null>(null);
+	let excerptHtml = $state<string | null>(null);
+	let excerptError = $state<string | null>(null);
+	$effect(() => {
+		const f = selectedFinding;
+		if (!f) {
+			excerpt = null;
+			excerptHtml = null;
+			excerptError = null;
+			return;
+		}
+		let cancelled = false;
+		excerptError = null;
+		getExcerpt(f.file, f.line_start, f.line_end)
+			.then((ex) => {
+				if (cancelled) return;
+				excerpt = ex;
+				return highlightCode(ex.text, ex.language);
+			})
+			.then((html) => {
+				if (!cancelled && html !== undefined) excerptHtml = html;
+			})
+			.catch((e) => {
+				if (cancelled) return;
+				excerpt = null;
+				excerptHtml = null;
+				excerptError = e instanceof Error ? e.message : String(e);
+			});
+		return () => {
+			cancelled = true;
+		};
+	});
 </script>
 
 <svelte:head>
@@ -987,6 +1242,30 @@
 				{scanResult || stage === 'done' || stage === 'cancelled' ? 'Re-scan' : 'Scan'}
 			</Button>
 		{/if}
+		{#if scanResult || resultRoot}
+			<div class="relative" bind:this={exportMenuRef}>
+				<Button size="sm" variant="outline" onclick={() => (exportMenuOpen = !exportMenuOpen)} aria-haspopup="menu" aria-expanded={exportMenuOpen}>
+					Export
+					<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="ml-1"><path d="m6 9 6 6 6-6"/></svg>
+				</Button>
+				{#if exportMenuOpen}
+					<div class="border-border bg-popover text-popover-foreground absolute right-0 top-full z-10 mt-1 w-48 overflow-hidden rounded-md border shadow-md" role="menu">
+						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportTo('markdown'); }}>
+							<div class="font-medium">Markdown</div>
+							<div class="text-muted-foreground">Readable .md report</div>
+						</button>
+						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportPdf(); }}>
+							<div class="font-medium">PDF</div>
+							<div class="text-muted-foreground">Print-formatted, via system dialog</div>
+						</button>
+						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportTo('sarif'); }}>
+							<div class="font-medium">SARIF</div>
+							<div class="text-muted-foreground">v2.1.0 for CI / code-scanning</div>
+						</button>
+					</div>
+				{/if}
+			</div>
+		{/if}
 		<div class="text-muted-foreground flex items-center gap-3 text-xs">
 			{#if usage.total.input_tokens + usage.total.output_tokens > 0}
 				<span
@@ -997,6 +1276,28 @@
 				</span>
 			{/if}
 			<span class="font-mono">{stage}</span>
+			<button
+				type="button"
+				onclick={() => (settingsOpen = true)}
+				class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
+				title="Settings"
+				aria-label="Settings"
+			>
+				<svg
+					xmlns="http://www.w3.org/2000/svg"
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<circle cx="12" cy="12" r="3" />
+					<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+				</svg>
+			</button>
 			<button
 				type="button"
 				onclick={() => theme.cycle()}
@@ -1593,6 +1894,31 @@
 							</ol>
 						</section>
 
+
+						<!-- Excerpt -->
+						{#if excerpt && excerpt.text.trim().length > 0}
+							<section class="space-y-2 px-5 py-4">
+								<div class="flex items-center justify-between gap-2">
+									<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+										{excerpt.source === 'enclosing_function' ? 'Enclosing function' : 'Excerpt'}
+									</h3>
+									<span class="text-muted-foreground font-mono text-[0.625rem]">
+										L{excerpt.start_line}-{excerpt.end_line}
+									</span>
+								</div>
+								{#if excerptHtml}
+									<div class="shiki-wrap">{@html excerptHtml}</div>
+								{:else}
+									<pre class="border-border bg-muted/40 overflow-auto rounded-md border p-3 font-mono text-xs leading-relaxed">{excerpt.text}</pre>
+								{/if}
+							</section>
+						{:else if excerptError}
+							<section class="px-5 py-4">
+								<p class="text-muted-foreground text-xs italic">
+									Excerpt unavailable: {excerptError}
+								</p>
+							</section>
+						{/if}
 						<!-- Verifier -->
 						{#if selectedVerdict}
 							<section class="space-y-2 px-5 py-4">
@@ -1655,27 +1981,77 @@
 
 						<!-- Patch -->
 						{#if selectedPatch}
+							{@const applied = appliedPatchIds.has(selectedFinding.id)}
 							<section class="space-y-3 px-5 py-4">
 								<div class="flex items-center justify-between gap-2">
-									<h3
-										class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-									>
+									<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
 										Patch
 									</h3>
-									<Badge variant="outline" class="font-mono text-[0.625rem]">
-										{selectedPatch.located.kind === 'not_found'
-											? 'not located'
-											: selectedPatch.located.kind}
-									</Badge>
+									<div class="flex items-center gap-1.5">
+										<Badge variant="outline" class="font-mono text-[0.625rem]">
+											{selectedPatch.located.kind === 'not_found'
+												? 'not located'
+												: selectedPatch.located.kind}
+										</Badge>
+										{#if applied}
+											<Badge class="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">applied ✓</Badge>
+										{/if}
+									</div>
 								</div>
+								{#if selectedPatchVariants.length > 1}
+									<div class="flex flex-wrap items-center gap-1">
+										<span class="text-muted-foreground text-[0.625rem] uppercase tracking-wider mr-1">Variants</span>
+										{#each selectedPatchVariants as _v, i (i)}
+											<button
+												type="button"
+												onclick={() => selectPatchVariant(i)}
+												class="inline-flex h-5 min-w-5 items-center justify-center rounded px-1.5 font-mono text-[0.625rem] font-semibold {i === selectedPatchVariantIdx ? 'bg-foreground text-background' : 'bg-muted text-muted-foreground hover:bg-muted/80'}"
+											>v{i + 1}</button>
+										{/each}
+									</div>
+								{/if}
 								<div class="md text-sm leading-relaxed">
 									{@html renderMd(selectedPatch.proposal.explanation)}
 								</div>
+								<div class="flex flex-wrap items-center gap-2">
+									{#if applied}
+										<Button size="sm" variant="outline" disabled>Applied to disk</Button>
+										<span class="text-muted-foreground text-xs">Use git to review or revert.</span>
+									{:else if selectedPatch.located.kind === 'not_found'}
+										<Button size="sm" disabled>Cannot apply (not located)</Button>
+									{:else}
+										<Button size="sm" onclick={applySelectedPatch} disabled={applyBusy}>
+											{applyBusy ? 'Applying…' : 'Apply patch'}
+										</Button>
+										{#if selectedPatch.located.kind === 'fuzzy'}
+											<span class="text-muted-foreground text-xs italic">Fuzzy match — review the diff before applying.</span>
+										{/if}
+									{/if}
+									<Button
+										size="sm"
+										variant="outline"
+										onclick={regenerateAlternative}
+										disabled={regenBusy || applied}
+										title="Ask the patcher for a structurally different fix"
+									>
+										{regenBusy ? 'Generating…' : 'Try another fix'}
+									</Button>
+								</div>
+								{#if regenError}
+									<p class="text-destructive text-xs">Regenerate failed: {regenError}</p>
+								{/if}
+								{#if applyError}
+									<p class="text-destructive text-xs">{applyError}</p>
+								{/if}
 								{#if selectedPatch.diff}
-									<pre
-										class="border-border bg-muted/40 overflow-auto rounded-md border font-mono text-xs leading-relaxed">{#each selectedPatch.diff.split('\n') as line, i (i)}<div
-												class="px-3 {diffLineClass(line)}"
-											>{line || ' '}</div>{/each}</pre>
+									{#if diffHtml}
+										<div class="shiki-wrap">{@html diffHtml}</div>
+									{:else}
+										<pre
+											class="border-border bg-muted/40 overflow-auto rounded-md border font-mono text-xs leading-relaxed">{#each selectedPatch.diff.split('\n') as line, i (i)}<div
+													class="px-3 {diffLineClass(line)}"
+												>{line || ' '}</div>{/each}</pre>
+									{/if}
 								{:else}
 									<div class="text-muted-foreground text-xs italic">
 										old_block not located in current file — raw proposal below.
@@ -1895,4 +2271,8 @@
 		</section>
 	</div>
 </div>
+{/if}
+
+{#if settingsOpen}
+	<Settings onClose={() => (settingsOpen = false)} />
 {/if}

@@ -187,14 +187,109 @@ export async function listenScanEvents(
 	return listen<ScanEvent>('scan:event', (e) => handler(e.payload));
 }
 
-export async function runPipeline(root: string): Promise<ScanResult> {
-	return invoke<ScanResult>('run_pipeline', { root });
+/** Optional config override matching the Rust `ScanConfig` shape. */
+export interface ScanConfigOverride {
+	triage_concurrency: number;
+	detect_concurrency: number;
+	verify_concurrency: number;
+	patch_concurrency: number;
+	triage_model: string;
+	detect_model: string;
+	verify_model: string;
+	patch_model: string;
+	budget_total_tokens: number | null;
+}
+
+export async function runPipeline(
+	root: string,
+	config?: ScanConfigOverride
+): Promise<ScanResult> {
+	return invoke<ScanResult>('run_pipeline', { root, config: config ?? null });
 }
 
 /** Flag the currently-running scan to cancel. Returns true if a scan was
  *  actively running. */
 export async function cancelScan(): Promise<boolean> {
 	return invoke<boolean>('cancel_scan');
+}
+
+// ---------- excerpts -----------------------------------------------------
+
+export type ExcerptSource = 'enclosing_function' | 'line_range';
+
+export interface Excerpt {
+	language: string | null;
+	start_line: number;
+	end_line: number;
+	text: string;
+	source: ExcerptSource;
+}
+
+export async function getExcerpt(
+	file: string,
+	lineStart: number,
+	lineEnd: number
+): Promise<Excerpt> {
+	return invoke<Excerpt>('get_excerpt', { file, lineStart, lineEnd });
+}
+
+// ---------- apply patch --------------------------------------------------
+
+export interface ApplyPatchResult {
+	located: Located;
+	bytes_written: number;
+}
+
+export async function applyPatch(
+	findingId: string,
+	root: string,
+	file: string,
+	oldBlock: string,
+	newBlock: string
+): Promise<ApplyPatchResult> {
+	return invoke<ApplyPatchResult>('apply_patch', {
+		findingId,
+		root,
+		file,
+		oldBlock,
+		newBlock
+	});
+}
+
+export interface AppliedPatchRecord {
+	finding_id: string;
+	file: string;
+	applied_at: number;
+}
+
+export async function getAppliedForRoot(root: string): Promise<AppliedPatchRecord[]> {
+	return invoke<AppliedPatchRecord[]>('get_applied_for_root', { root });
+}
+
+// ---------- export -------------------------------------------------------
+
+export async function exportMarkdown(root: string): Promise<string> {
+	return invoke<string>('export_markdown', { root });
+}
+
+export async function exportSarif(root: string): Promise<string> {
+	return invoke<string>('export_sarif', { root });
+}
+
+/** Backend-side file write — avoids fs-plugin scope restrictions on the path
+ *  returned by the native save dialog. */
+export async function saveTextFile(path: string, content: string): Promise<void> {
+	return invoke<void>('save_text_file', { path, content });
+}
+
+/** Ask the patcher for an alternative fix that's structurally different
+ *  from the supplied prior attempts. */
+export async function regeneratePatch(
+	root: string,
+	verified: VerifiedFinding,
+	priorAttempts: PatchProposal[]
+): Promise<Patch> {
+	return invoke<Patch>('regenerate_patch', { root, verified, priorAttempts });
 }
 
 // ---------- persisted scans -----------------------------------------------
@@ -224,6 +319,14 @@ export async function deleteScan(scanId: string): Promise<void> {
 
 export async function deleteScansForRoot(root: string): Promise<void> {
 	return invoke<void>('delete_scans_for_root', { root });
+}
+
+/** Convenience: find the most-recent scan for `root` and load it. */
+export async function getLatestScanFor(root: string): Promise<ScanResult> {
+	const groups = await listScanGroups(50);
+	const match = groups.find((g) => g.root === root);
+	if (!match) throw new Error(`no persisted scan for ${root}`);
+	return loadScan(match.latest_scan_id);
 }
 
 // ---------- triage -------------------------------------------------------

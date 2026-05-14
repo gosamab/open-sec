@@ -9,10 +9,16 @@ use tracing::{info, instrument, warn};
 use crate::config;
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::Provider;
+use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
+use crate::scanner::excerpts::{extract_from_str, Excerpt};
 use crate::scanner::orchestrate::{run_scan, ScanConfig, ScanEvent, ScanResult};
+use crate::scanner::patch::{
+    locate, propose_one_with_history, Located, Patch, PatchProposal, DEFAULT_PATCH_MODEL,
+};
+use crate::scanner::verify::VerifiedFinding;
 use crate::scanner::Finding;
-use crate::store::{ScanGroup, Store, TriageRecord, TriageStatus};
+use crate::store::{AppliedPatchRecord, ScanGroup, Store, TriageRecord, TriageStatus};
 
 /// Shared, app-wide cancel handle. Only one scan can run at a time (single
 /// workspace UX), so a single slot is enough — when a new scan starts it
@@ -106,6 +112,7 @@ pub async fn run_pipeline(
     store: State<'_, Store>,
     cancel: State<'_, CancelHandle>,
     root: String,
+    config: Option<ScanConfig>,
 ) -> Result<ScanResult, String> {
     let root_path = PathBuf::from(&root);
     if !root_path.is_dir() {
@@ -128,7 +135,7 @@ pub async fn run_pipeline(
     });
 
     let cancel_flag = cancel.install();
-    let config = ScanConfig::default();
+    let config = config.unwrap_or_default();
     let result = run_scan(root_path, provider, &config, Some(tx), Some(cancel_flag.clone()))
         .await
         .map_err(|e| {
@@ -156,6 +163,154 @@ pub async fn run_pipeline(
 #[tauri::command]
 pub fn cancel_scan(cancel: State<'_, CancelHandle>) -> bool {
     cancel.cancel()
+}
+
+/// Read a code excerpt for the finding's line range. Uses tree-sitter to
+/// locate the enclosing function/class when possible, falls back to a ±N
+/// line window for unsupported languages or top-level code.
+#[tauri::command]
+pub fn get_excerpt(
+    file: String,
+    line_start: u32,
+    line_end: u32,
+) -> Result<Excerpt, String> {
+    extract_from_str(&file, line_start, line_end).map_err(|e| format!("{e:#}"))
+}
+
+#[derive(serde::Serialize)]
+pub struct ApplyPatchResult {
+    pub located: Located,
+    pub bytes_written: u64,
+}
+
+/// Regenerate a patch for an already-verified finding, asking the model
+/// for a structurally different proposal than the previous attempts.
+/// `prior_attempts` carries the proposals already shown to the user.
+#[tauri::command]
+pub async fn regenerate_patch(
+    root: String,
+    verified: VerifiedFinding,
+    prior_attempts: Vec<PatchProposal>,
+) -> Result<Patch, String> {
+    let scan_root = PathBuf::from(&root);
+    if !scan_root.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
+    let provider: Arc<dyn Provider> =
+        Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
+    propose_one_with_history(
+        &verified,
+        &scan_root,
+        provider.as_ref(),
+        DEFAULT_PATCH_MODEL,
+        &prior_attempts,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Apply a patch to disk. Re-locates `old_block` in the current file
+/// content (exact match first, then fuzzy whitespace-tolerant), splices
+/// `new_block` in its place, and writes the result back. Fails cleanly
+/// if the file has drifted such that `old_block` no longer matches —
+/// no partial writes. Records the apply in SQLite so the UI badge
+/// survives reloads.
+#[tauri::command]
+pub fn apply_patch(
+    store: State<'_, Store>,
+    finding_id: String,
+    root: String,
+    file: String,
+    old_block: String,
+    new_block: String,
+) -> Result<ApplyPatchResult, String> {
+    let path = PathBuf::from(&file);
+    if !path.is_file() {
+        return Err(format!("not a file: {file}"));
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+
+    let located = locate(&source, &old_block);
+    let (off, len) = match &located {
+        Located::Exact { byte_offset, .. } => (*byte_offset, old_block.len()),
+        Located::Fuzzy {
+            byte_offset,
+            matched_text,
+            ..
+        } => (*byte_offset, matched_text.len()),
+        Located::NotFound => {
+            return Err(
+                "old_block not located in current file — the file may have changed since the patch was generated"
+                    .into(),
+            );
+        }
+    };
+
+    let mut modified = String::with_capacity(source.len() + new_block.len());
+    modified.push_str(&source[..off]);
+    modified.push_str(&new_block);
+    modified.push_str(&source[off + len..]);
+
+    let bytes_written = modified.len() as u64;
+    std::fs::write(&path, &modified)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    if let Err(e) = store.record_patch_applied(&finding_id, &root, &file) {
+        warn!(error = %format!("{e:#}"), "failed to record applied patch in store");
+    }
+    info!(file = %path.display(), bytes_written, %finding_id, "patch applied");
+    Ok(ApplyPatchResult {
+        located,
+        bytes_written,
+    })
+}
+
+/// List every finding whose patch has been applied (in this root). The UI
+/// uses this on hydration to restore the applied badge after a reload.
+#[tauri::command]
+pub fn get_applied_for_root(
+    store: State<'_, Store>,
+    root: String,
+) -> Result<Vec<AppliedPatchRecord>, String> {
+    store
+        .get_applied_for_root(&root)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Find the most recent scan for `root` and return its scan_id.
+fn latest_scan_id_for(store: &Store, root: &str) -> Result<String, String> {
+    let groups = store.list_scan_groups(50).map_err(|e| format!("{e:#}"))?;
+    groups
+        .into_iter()
+        .find(|g| g.root == root)
+        .map(|g| g.latest_scan_id)
+        .ok_or_else(|| format!("no persisted scan found for {root}"))
+}
+
+/// Render a markdown report for the latest persisted scan of `root`.
+#[tauri::command]
+pub fn export_markdown(store: State<'_, Store>, root: String) -> Result<String, String> {
+    let id = latest_scan_id_for(store.inner(), &root)?;
+    let result = store.load_scan(&id).map_err(|e| format!("{e:#}"))?;
+    Ok(export::export_markdown(&result))
+}
+
+/// Render a SARIF v2.1.0 document for the latest persisted scan of `root`.
+#[tauri::command]
+pub fn export_sarif(store: State<'_, Store>, root: String) -> Result<String, String> {
+    let id = latest_scan_id_for(store.inner(), &root)?;
+    let result = store.load_scan(&id).map_err(|e| format!("{e:#}"))?;
+    Ok(export::export_sarif(&result))
+}
+
+/// Write a UTF-8 file to disk. Used by the export buttons to save the
+/// content returned by `export_markdown` / `export_sarif` to a user-picked
+/// path — avoids needing a permissive `fs` scope on the frontend.
+#[tauri::command]
+pub fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, &content).map_err(|e| format!("write {path}: {e}"))
 }
 
 /// List the most recent scan groups (one row per root) for the launcher.

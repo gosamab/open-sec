@@ -38,6 +38,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls"] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
+tauri-plugin-updater = "2.9.1"
+tauri-plugin-process = "2.3.1"
 bytes = "1.11.1"
 tree-sitter = "0.26.8"
 tree-sitter-rust = "0.24.2"
@@ -49,3 +51,9 @@ regex = "1.12.3"
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6.5"
+
+# NOTE: calibration CLIs (scan_cli, triage_cli, verify_cli, patch_cli,
+# pipeline_cli) live in src/bin/ and ship inside the .app bundle (Tauri
+# auto-discovers every [[bin]] target). Acceptable bloat for v0.1.0;
+# moving them to a workspace sibling crate would let production builds
+# drop ~8 MB. Tracked as future work.

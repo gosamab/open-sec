@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "open-sec",
+  "productName": "Open Security",
   "version": "0.1.0",
-  "identifier": "com.opensec.app",
+  "identifier": "com.oazab.open-sec",
   "build": {
     "frontendDist": "../build",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "open-sec",
+        "title": "Open Security",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,
@@ -23,6 +23,16 @@
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": [
+        "https://github.com/oazab/open-sec/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE1RDM4NDc1MjgwQTkyNkMKUldSc2tnb29kWVRUcGM0ZkdLQ0ZrVGRFenRhMzZJbDlnbmM2R1JYUVFDOW1aelpnRnFoaW1LdFIK"
     }
   },
   "bundle": {

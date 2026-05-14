@@ -10,12 +10,16 @@
 	import { theme } from '$lib/theme.svelte';
 	import {
 		EMPTY_STAGE_USAGE,
+		cancelScan,
+		clearTriage,
+		getTriageForRoot,
 		hasAnthropicKey,
 		listenScanEvents,
 		listScanGroups,
 		loadScan,
 		runPipeline,
 		setAnthropicKey,
+		setTriage,
 		type Finding,
 		type FileFindings,
 		type Patch,
@@ -26,6 +30,8 @@
 		type SkipReason,
 		type StageUsage,
 		type TriagedFile,
+		type TriageRecord,
+		type TriageStatus,
 		type Verdict,
 		type VerifiedFinding,
 		type WalkResult
@@ -39,6 +45,7 @@
 
 	let root = $state('');
 	let scanning = $state(false);
+	let cancelling = $state(false);
 	let stage = $state<string>('idle');
 	let error = $state<string | null>(null);
 
@@ -53,6 +60,13 @@
 	let patchById = $state<Map<string, Patch>>(new Map());
 	let usage = $state<StageUsage>(EMPTY_STAGE_USAGE);
 	let scanResult = $state<ScanResult | null>(null);
+
+	/** Triage decisions keyed by finding_id (scoped to the current root). */
+	let triageById = $state<Map<string, TriageRecord>>(new Map());
+	let triageBusy = $state(false);
+	let dismissDraftFor = $state<string | null>(null);
+	let dismissReason = $state('');
+	let hideDismissed = $state(true);
 
 	let selectedFile = $state<string | null>(null);
 	let selectedFindingId = $state<string | null>(null);
@@ -128,6 +142,7 @@
 	async function runScan() {
 		if (!root || scanning) return;
 		scanning = true;
+		cancelling = false;
 		error = null;
 		stage = 'starting…';
 		walk = null;
@@ -143,12 +158,25 @@
 		try {
 			scanResult = await runPipeline(root);
 			resultRoot = root;
-			stage = 'done';
+			stage = cancelling ? 'cancelled' : 'done';
+			await reloadTriageForCurrentRoot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			stage = 'error';
 		} finally {
 			scanning = false;
+			cancelling = false;
+		}
+	}
+
+	async function requestCancel() {
+		if (!scanning || cancelling) return;
+		cancelling = true;
+		stage = 'cancelling…';
+		try {
+			await cancelScan();
+		} catch (e) {
+			console.error('cancel_scan failed', e);
 		}
 	}
 
@@ -190,6 +218,21 @@
 		stage = 'idle';
 		error = null;
 		resultRoot = null;
+		triageById = new Map();
+		dismissDraftFor = null;
+		dismissReason = '';
+	}
+
+	async function reloadTriageForCurrentRoot() {
+		if (!root) return;
+		try {
+			const rs = await getTriageForRoot(root);
+			const m = new Map<string, TriageRecord>();
+			for (const r of rs) m.set(r.finding_id, r);
+			triageById = m;
+		} catch (e) {
+			console.error('getTriageForRoot failed', e);
+		}
 	}
 
 	/** + New project: just enter workspace with the root set. No scan triggered. */
@@ -207,6 +250,7 @@
 		try {
 			const r = await loadScan(group.latest_scan_id);
 			hydrateFromScanResult(r);
+			await reloadTriageForCurrentRoot();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -338,6 +382,9 @@
 	let visibleFindings = $derived.by(() => {
 		let xs = allFindings;
 		if (selectedFile) xs = xs.filter((x) => x.rel === selectedFile);
+		if (hideDismissed) {
+			xs = xs.filter((x) => triageById.get(x.f.id)?.status !== 'dismissed');
+		}
 		const q = filter.trim().toLowerCase();
 		if (q) {
 			xs = xs.filter(
@@ -349,6 +396,12 @@
 			);
 		}
 		return xs;
+	});
+
+	let dismissedCount = $derived.by(() => {
+		let n = 0;
+		for (const t of triageById.values()) if (t.status === 'dismissed') n++;
+		return n;
 	});
 
 	let selectedFinding = $derived.by(() => {
@@ -688,6 +741,98 @@
 		{ name: 'patch', u: usage.patch }
 	]);
 
+	// ---------- triage actions ------------------------------------------
+	const SNOOZE_DAYS = 7;
+
+	async function applyTriage(
+		findingId: string,
+		status: TriageStatus,
+		reason?: string
+	) {
+		if (!root) return;
+		triageBusy = true;
+		try {
+			const snoozeUntil =
+				status === 'snoozed' ? Date.now() + SNOOZE_DAYS * 24 * 60 * 60 * 1000 : undefined;
+			await setTriage(findingId, root, status, reason, snoozeUntil);
+			const m = new Map(triageById);
+			m.set(findingId, {
+				finding_id: findingId,
+				status,
+				reason: reason ?? null,
+				snooze_until: snoozeUntil ?? null,
+				updated_at: Date.now()
+			});
+			triageById = m;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			triageBusy = false;
+		}
+	}
+
+	async function clearTriageFor(findingId: string) {
+		if (!root) return;
+		triageBusy = true;
+		try {
+			await clearTriage(findingId, root);
+			const m = new Map(triageById);
+			m.delete(findingId);
+			triageById = m;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			triageBusy = false;
+		}
+	}
+
+	function startDismiss(findingId: string) {
+		dismissDraftFor = findingId;
+		dismissReason = triageById.get(findingId)?.reason ?? '';
+	}
+
+	function cancelDismiss() {
+		dismissDraftFor = null;
+		dismissReason = '';
+	}
+
+	async function submitDismiss(findingId: string) {
+		const r = dismissReason.trim();
+		if (!r) return;
+		await applyTriage(findingId, 'dismissed', r);
+		dismissDraftFor = null;
+		dismissReason = '';
+	}
+
+	function triageBadgeClass(s: TriageStatus): string {
+		switch (s) {
+			case 'accepted':
+				return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300';
+			case 'dismissed':
+				return 'bg-zinc-400/15 text-zinc-500';
+			case 'snoozed':
+				return 'bg-violet-500/15 text-violet-700 dark:text-violet-300';
+		}
+	}
+
+	function triageBadgeLabel(t: TriageRecord): string {
+		switch (t.status) {
+			case 'accepted':
+				return 'accepted';
+			case 'dismissed':
+				return 'dismissed';
+			case 'snoozed':
+				if (t.snooze_until) {
+					const days = Math.max(
+						0,
+						Math.ceil((t.snooze_until - Date.now()) / (24 * 60 * 60 * 1000))
+					);
+					return `snoozed · ${days}d`;
+				}
+				return 'snoozed';
+		}
+	}
+
 	function priorityChipLabel(p: Priority | null): string {
 		switch (p) {
 			case 'high':
@@ -833,9 +978,15 @@
 		<div class="text-foreground/80 flex flex-1 items-center gap-2 truncate font-mono text-xs">
 			<span class="truncate" title={root}>{root}</span>
 		</div>
-		<Button size="sm" onclick={runScan} disabled={scanning || !root || !keyConfigured}>
-			{scanning ? 'Scanning…' : scanResult || stage === 'done' ? 'Re-scan' : 'Scan'}
-		</Button>
+		{#if scanning}
+			<Button size="sm" variant="outline" onclick={requestCancel} disabled={cancelling}>
+				{cancelling ? 'Cancelling…' : 'Cancel'}
+			</Button>
+		{:else}
+			<Button size="sm" onclick={runScan} disabled={!root || !keyConfigured}>
+				{scanResult || stage === 'done' || stage === 'cancelled' ? 'Re-scan' : 'Scan'}
+			</Button>
+		{/if}
 		<div class="text-muted-foreground flex items-center gap-3 text-xs">
 			{#if usage.total.input_tokens + usage.total.output_tokens > 0}
 				<span
@@ -1131,13 +1282,23 @@
 				</span>
 			</div>
 			{#if allFindings.length > 0 || filter}
-				<div class="border-border border-b px-3 py-2">
+				<div class="border-border space-y-1.5 border-b px-3 py-2">
 					<Input
 						bind:value={filter}
 						placeholder="Filter by title, CWE, file…"
 						spellcheck={false}
 						class="h-7 text-xs"
 					/>
+					{#if dismissedCount > 0}
+						<label class="text-muted-foreground flex items-center gap-1.5 text-xs">
+							<input
+								type="checkbox"
+								bind:checked={hideDismissed}
+								class="h-3 w-3 accent-current"
+							/>
+							Hide dismissed ({dismissedCount})
+						</label>
+					{/if}
 				</div>
 			{/if}
 			<div class="flex-1 overflow-y-auto">
@@ -1210,15 +1371,16 @@
 				{:else}
 					{#each visibleFindings as { f, rel } (f.id)}
 						{@const status = verdictStatus(f)}
+						{@const triage = triageById.get(f.id)}
 						<button
 							type="button"
 							data-finding-id={f.id}
-							class="hover:bg-muted/40 border-border block w-full border-b px-4 py-3 text-left {selectedFindingId === f.id ? 'bg-muted/60' : ''}"
+							class="hover:bg-muted/40 border-border block w-full border-b px-4 py-3 text-left {selectedFindingId === f.id ? 'bg-muted/60' : ''} {triage?.status === 'dismissed' ? 'opacity-60' : ''}"
 							onclick={() => selectFinding(f.id)}
 						>
 							<div class="flex items-start justify-between gap-2">
 								<div class="flex-1 space-y-1">
-									<div class="flex items-center gap-1.5">
+									<div class="flex flex-wrap items-center gap-1.5">
 										<Badge class={severityClass(f.severity)}>{f.severity}</Badge>
 										<span class="text-muted-foreground font-mono text-xs">{f.cwe}</span>
 										{#if f.owasp}
@@ -1239,6 +1401,11 @@
 										{:else if status === 'hardening'}
 											<Badge class="bg-sky-500/15 text-sky-700 dark:text-sky-300">
 												hardening
+											</Badge>
+										{/if}
+										{#if triage}
+											<Badge class={triageBadgeClass(triage.status)}>
+												{triageBadgeLabel(triage)}
 											</Badge>
 										{/if}
 									</div>
@@ -1286,6 +1453,10 @@
 										· OWASP {selectedFinding.owasp}
 									</span>
 								{/if}
+								{#if triageById.has(selectedFinding.id)}
+									{@const t = triageById.get(selectedFinding.id)!}
+									<Badge class={triageBadgeClass(t.status)}>{triageBadgeLabel(t)}</Badge>
+								{/if}
 							</div>
 							<h2 class="text-base font-semibold leading-snug tracking-tight">
 								{selectedFinding.title}
@@ -1296,6 +1467,104 @@
 									? `-${selectedFinding.line_end}`
 									: ''}
 							</p>
+
+							<!-- Triage actions -->
+							{#if dismissDraftFor === selectedFinding.id}
+								<div class="border-border space-y-2 rounded-md border p-2">
+									<div class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+										Reason for dismissal
+									</div>
+									<Input
+										bind:value={dismissReason}
+										placeholder="e.g. false positive: this param is server-controlled"
+										class="h-8 text-xs"
+										autofocus
+										onkeydown={(e) => {
+											if (e.key === 'Enter' && dismissReason.trim()) {
+												submitDismiss(selectedFinding!.id);
+											} else if (e.key === 'Escape') {
+												cancelDismiss();
+											}
+										}}
+									/>
+									<div class="flex gap-2">
+										<Button
+											size="sm"
+											onclick={() => submitDismiss(selectedFinding!.id)}
+											disabled={!dismissReason.trim() || triageBusy}
+										>
+											Confirm dismiss
+										</Button>
+										<Button size="sm" variant="outline" onclick={cancelDismiss}>
+											Cancel
+										</Button>
+									</div>
+								</div>
+							{:else}
+								<div class="flex flex-wrap gap-2 pt-1">
+									{#if triageById.get(selectedFinding.id)?.status === 'accepted'}
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={() => clearTriageFor(selectedFinding!.id)}
+											disabled={triageBusy}
+										>
+											Un-accept
+										</Button>
+									{:else}
+										<Button
+											size="sm"
+											onclick={() => applyTriage(selectedFinding!.id, 'accepted')}
+											disabled={triageBusy}
+										>
+											Accept
+										</Button>
+									{/if}
+									{#if triageById.get(selectedFinding.id)?.status === 'dismissed'}
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={() => clearTriageFor(selectedFinding!.id)}
+											disabled={triageBusy}
+										>
+											Un-dismiss
+										</Button>
+									{:else}
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={() => startDismiss(selectedFinding!.id)}
+											disabled={triageBusy}
+										>
+											Dismiss…
+										</Button>
+									{/if}
+									{#if triageById.get(selectedFinding.id)?.status === 'snoozed'}
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={() => clearTriageFor(selectedFinding!.id)}
+											disabled={triageBusy}
+										>
+											Un-snooze
+										</Button>
+									{:else}
+										<Button
+											size="sm"
+											variant="outline"
+											onclick={() => applyTriage(selectedFinding!.id, 'snoozed')}
+											disabled={triageBusy}
+										>
+											Snooze {SNOOZE_DAYS}d
+										</Button>
+									{/if}
+								</div>
+								{#if triageById.get(selectedFinding.id)?.status === 'dismissed' && triageById.get(selectedFinding.id)?.reason}
+									<p class="text-muted-foreground pt-1 text-xs italic">
+										Reason: {triageById.get(selectedFinding.id)!.reason}
+									</p>
+								{/if}
+							{/if}
 						</header>
 
 						<!-- Description -->

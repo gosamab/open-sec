@@ -191,6 +191,12 @@ export async function runPipeline(root: string): Promise<ScanResult> {
 	return invoke<ScanResult>('run_pipeline', { root });
 }
 
+/** Flag the currently-running scan to cancel. Returns true if a scan was
+ *  actively running. */
+export async function cancelScan(): Promise<boolean> {
+	return invoke<boolean>('cancel_scan');
+}
+
 // ---------- persisted scans -----------------------------------------------
 
 export interface ScanGroup {
@@ -218,4 +224,40 @@ export async function deleteScan(scanId: string): Promise<void> {
 
 export async function deleteScansForRoot(root: string): Promise<void> {
 	return invoke<void>('delete_scans_for_root', { root });
+}
+
+// ---------- triage -------------------------------------------------------
+
+export type TriageStatus = 'accepted' | 'dismissed' | 'snoozed';
+
+export interface TriageRecord {
+	finding_id: string;
+	status: TriageStatus;
+	reason: string | null;
+	snooze_until: number | null;
+	updated_at: number;
+}
+
+export async function setTriage(
+	findingId: string,
+	root: string,
+	status: TriageStatus,
+	reason?: string,
+	snoozeUntil?: number
+): Promise<void> {
+	return invoke<void>('set_triage', {
+		findingId,
+		root,
+		status,
+		reason: reason ?? null,
+		snoozeUntil: snoozeUntil ?? null
+	});
+}
+
+export async function clearTriage(findingId: string, root: string): Promise<void> {
+	return invoke<void>('clear_triage', { findingId, root });
+}
+
+export async function getTriageForRoot(root: string): Promise<TriageRecord[]> {
+	return invoke<TriageRecord[]>('get_triage_for_root', { root });
 }

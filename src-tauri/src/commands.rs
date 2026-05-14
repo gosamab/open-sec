@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
@@ -11,7 +12,36 @@ use crate::providers::Provider;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
 use crate::scanner::orchestrate::{run_scan, ScanConfig, ScanEvent, ScanResult};
 use crate::scanner::Finding;
-use crate::store::{ScanGroup, Store};
+use crate::store::{ScanGroup, Store, TriageRecord, TriageStatus};
+
+/// Shared, app-wide cancel handle. Only one scan can run at a time (single
+/// workspace UX), so a single slot is enough — when a new scan starts it
+/// installs a fresh flag and replaces whatever was there.
+#[derive(Default)]
+pub struct CancelHandle {
+    current: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+impl CancelHandle {
+    pub fn install(&self) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        *self.current.lock().unwrap() = Some(flag.clone());
+        flag
+    }
+
+    pub fn clear(&self) {
+        *self.current.lock().unwrap() = None;
+    }
+
+    pub fn cancel(&self) -> bool {
+        if let Some(flag) = self.current.lock().unwrap().as_ref() {
+            flag.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[tauri::command]
 pub fn greet(name: String) -> Result<String, String> {
@@ -67,11 +97,14 @@ pub async fn scan_file(
 /// Run the full pipeline on a directory. Streams per-stage progress to the
 /// frontend via the "scan:event" Tauri event; resolves with the final
 /// `ScanResult`. On success, persists the result to SQLite for later recall.
+/// If `cancel_scan` is invoked while running, returns the partial result
+/// with status `cancelled`.
 #[tauri::command]
-#[instrument(skip(app, store), fields(root = %root))]
+#[instrument(skip(app, store, cancel), fields(root = %root))]
 pub async fn run_pipeline(
     app: AppHandle,
     store: State<'_, Store>,
+    cancel: State<'_, CancelHandle>,
     root: String,
 ) -> Result<ScanResult, String> {
     let root_path = PathBuf::from(&root);
@@ -94,21 +127,35 @@ pub async fn run_pipeline(
         }
     });
 
+    let cancel_flag = cancel.install();
     let config = ScanConfig::default();
-    let result = run_scan(root_path, provider, &config, Some(tx))
+    let result = run_scan(root_path, provider, &config, Some(tx), Some(cancel_flag.clone()))
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| {
+            cancel.clear();
+            format!("{e:#}")
+        })?;
 
     let _ = forward_task.await;
 
-    // Persist asynchronously of the IPC response — failures here shouldn't
-    // poison the scan result the user just got, but should be logged.
-    match store.save_scan(&result, "completed") {
-        Ok(scan_id) => info!(scan_id = %scan_id, "scan persisted"),
+    let was_cancelled = cancel_flag.load(Ordering::SeqCst);
+    cancel.clear();
+    let status = if was_cancelled { "cancelled" } else { "completed" };
+
+    match store.save_scan(&result, status) {
+        Ok(scan_id) => info!(scan_id = %scan_id, status, "scan persisted"),
         Err(e) => warn!(error = %format!("{e:#}"), "failed to persist scan"),
     }
 
     Ok(result)
+}
+
+/// Flag the currently-running scan for cancellation. The pipeline will
+/// finish the current API call, skip subsequent stages, and return
+/// whatever it had collected.
+#[tauri::command]
+pub fn cancel_scan(cancel: State<'_, CancelHandle>) -> bool {
+    cancel.cancel()
 }
 
 /// List the most recent scan groups (one row per root) for the launcher.
@@ -140,5 +187,57 @@ pub fn delete_scan(store: State<'_, Store>, scan_id: String) -> Result<(), Strin
 pub fn delete_scans_for_root(store: State<'_, Store>, root: String) -> Result<(), String> {
     store
         .delete_scans_for_root(&root)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Set (or upsert) a triage decision on a finding. `status` is one of
+/// `accepted`, `dismissed`, `snoozed`. `reason` is required for `dismissed`;
+/// `snooze_until` is required for `snoozed`.
+#[tauri::command]
+pub fn set_triage(
+    store: State<'_, Store>,
+    finding_id: String,
+    root: String,
+    status: String,
+    reason: Option<String>,
+    snooze_until: Option<i64>,
+) -> Result<(), String> {
+    let parsed = match status.as_str() {
+        "accepted" => TriageStatus::Accepted,
+        "dismissed" => TriageStatus::Dismissed,
+        "snoozed" => TriageStatus::Snoozed,
+        other => return Err(format!("unknown triage status: {other}")),
+    };
+    if parsed == TriageStatus::Dismissed && reason.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err("dismissed requires a non-empty reason".into());
+    }
+    if parsed == TriageStatus::Snoozed && snooze_until.is_none() {
+        return Err("snoozed requires snooze_until (unix ms)".into());
+    }
+    store
+        .set_triage(&finding_id, &root, parsed, reason.as_deref(), snooze_until)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Remove a triage decision so the finding is unmarked again.
+#[tauri::command]
+pub fn clear_triage(
+    store: State<'_, Store>,
+    finding_id: String,
+    root: String,
+) -> Result<(), String> {
+    store
+        .clear_triage(&finding_id, &root)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Load every triage decision for a root.
+#[tauri::command]
+pub fn get_triage_for_root(
+    store: State<'_, Store>,
+    root: String,
+) -> Result<Vec<TriageRecord>, String> {
+    store
+        .get_triage_for_root(&root)
         .map_err(|e| format!("{e:#}"))
 }

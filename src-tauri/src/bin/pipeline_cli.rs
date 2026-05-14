@@ -75,7 +75,7 @@ async fn run(root: PathBuf, json_out: bool) -> anyhow::Result<()> {
     let config = ScanConfig::default();
 
     eprintln!(">>> scanning {}", root.display());
-    let result = run_scan(root, provider, &config, None).await?;
+    let result = run_scan(root, provider, &config, None, None).await?;
 
     print_summary(&result);
 

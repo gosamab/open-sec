@@ -9,6 +9,7 @@
 //! Step 8.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{info, instrument, warn};
 
-use crate::providers::counting::{diff, CountingProvider, UsageCounter};
+use crate::providers::counting::{diff, CancellingProvider, CountingProvider, UsageCounter};
 use crate::providers::{Provider, Usage};
 use crate::scanner::detect::{self, scan_with_tools};
 use crate::scanner::ingest::{self, Candidate, WalkResult};
@@ -159,17 +160,25 @@ pub async fn run_scan(
     provider: Arc<dyn Provider>,
     config: &ScanConfig,
     events: Option<EventSender>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ScanResult> {
     let events = events.as_ref();
     emit(events, ScanEvent::Started { root: root.clone() });
 
     // Wrap the inbound provider so every `generate()` accrues into a shared
     // counter. We snapshot the counter at each stage boundary to attribute
-    // tokens per stage.
+    // tokens per stage. If a cancellation flag was supplied, also wrap so
+    // every API call short-circuits once it flips — stages still drain their
+    // already-spawned tasks, but new API round-trips fail fast.
     let counter = UsageCounter::new();
-    let provider: Arc<dyn Provider> = Arc::new(CountingProvider::new(provider, counter.clone()));
+    let mut provider: Arc<dyn Provider> = Arc::new(CountingProvider::new(provider, counter.clone()));
+    if let Some(flag) = cancel.clone() {
+        provider = Arc::new(CancellingProvider::new(provider, flag));
+    }
     let mut stage_usage = StageUsage::default();
     let mut snapshot_before_stage = counter.snapshot();
+
+    let is_cancelled = || cancel.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
 
     // ----- 1. Ingest --------------------------------------------------
     let ingest = ingest::walk(&root).context("walking scan root")?;
@@ -191,7 +200,7 @@ pub async fn run_scan(
         },
     );
 
-    if ingest.candidates.is_empty() {
+    if ingest.candidates.is_empty() || is_cancelled() {
         return Ok(ScanResult {
             root,
             ingest,
@@ -238,6 +247,19 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+    }
+
+    if is_cancelled() {
+        info!("scan cancelled after triage");
+        return Ok(ScanResult {
+            root,
+            ingest,
+            triaged,
+            findings_by_file: Vec::new(),
+            verified: Vec::new(),
+            patches: Vec::new(),
+            usage: stage_usage,
+        });
     }
 
     // ----- 3. Detect (parallel under Semaphore, streaming per-file) ---
@@ -326,7 +348,10 @@ pub async fn run_scan(
     }
 
     // ----- 4. Verify --------------------------------------------------
-    let verified = if all_findings.is_empty() {
+    let verified = if all_findings.is_empty() || is_cancelled() {
+        if is_cancelled() {
+            info!("scan cancelled after detect; skipping verify/patch");
+        }
         Vec::new()
     } else {
         verify_many(
@@ -370,7 +395,10 @@ pub async fn run_scan(
     }
 
     // ----- 5. Patch ---------------------------------------------------
-    let patches = if kept_or_hardening == 0 {
+    let patches = if kept_or_hardening == 0 || is_cancelled() {
+        if is_cancelled() {
+            info!("scan cancelled after verify; skipping patch");
+        }
         Vec::new()
     } else {
         propose_many(

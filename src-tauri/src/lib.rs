@@ -36,6 +36,7 @@ pub fn run() {
             let store = store::Store::open(&db_path)
                 .unwrap_or_else(|e| panic!("opening store at {}: {e:#}", db_path.display()));
             app.manage(store);
+            app.manage(commands::CancelHandle::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -44,10 +45,14 @@ pub fn run() {
             commands::set_anthropic_key,
             commands::scan_file,
             commands::run_pipeline,
+            commands::cancel_scan,
             commands::list_scan_groups,
             commands::load_scan,
             commands::delete_scan,
             commands::delete_scans_for_root,
+            commands::set_triage,
+            commands::clear_triage,
+            commands::get_triage_for_root,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,6 +4,7 @@
 //! single counter is shared by the wrapper, the orchestrator snapshots the
 //! counter before each stage and subtracts to get the stage's contribution.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -87,6 +88,47 @@ impl Provider for CountingProvider {
         &self,
         req: GenerationRequest,
     ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
+        self.inner.stream(req).await
+    }
+}
+
+/// Wraps an inner provider and short-circuits every `generate()` /
+/// `stream()` call with `ProviderError::Cancelled` once the shared flag
+/// flips to true. Already-running HTTP requests aren't aborted — but every
+/// agent loop checks `provider.generate()` before each iteration, so cancel
+/// takes effect at the next round-trip without needing to thread a
+/// cancellation token through every `*_many` signature.
+pub struct CancellingProvider {
+    inner: Arc<dyn Provider>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl CancellingProvider {
+    pub fn new(inner: Arc<dyn Provider>, cancel: Arc<AtomicBool>) -> Self {
+        Self { inner, cancel }
+    }
+}
+
+#[async_trait]
+impl Provider for CancellingProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(crate::error::ProviderError::Cancelled);
+        }
+        self.inner.generate(req).await
+    }
+
+    async fn stream(
+        &self,
+        req: GenerationRequest,
+    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(crate::error::ProviderError::Cancelled);
+        }
         self.inner.stream(req).await
     }
 }

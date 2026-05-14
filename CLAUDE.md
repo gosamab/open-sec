@@ -150,7 +150,10 @@ open-sec/
 8. ✅ Full pipeline + UI (three-pane workspace)
    - ✅ 8a. Orchestrator + `pipeline_cli` (end-to-end: ingest → triage → detect → verify → patch)
    - ✅ 8b. SvelteKit three-pane UI with live event streaming (folder picker, files/findings/detail panes, progressive updates as triage→detect→verify→patch land)
-9. Persistence (SQLite scans/findings)
+9. ✅ Persistence (SQLite scans/findings)
+   - ✅ 9a. Store schema, scan history, launcher reads from SQLite, past-scan hydration
+   - ✅ 9b. Triage workflow (accept/dismiss/snooze) keyed by stable finding ID; carries over on re-scan
+   - ✅ 9c. Cancel with partial findings — `CancellingProvider` wraps every API call, stage-boundary checks return partial state, status `cancelled` persisted
 
 ## Calibration log
 

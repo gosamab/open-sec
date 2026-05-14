@@ -79,6 +79,41 @@ CREATE TABLE IF NOT EXISTS triage (
 );
 "#;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriageStatus {
+    Accepted,
+    Dismissed,
+    Snoozed,
+}
+
+impl TriageStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            TriageStatus::Accepted => "accepted",
+            TriageStatus::Dismissed => "dismissed",
+            TriageStatus::Snoozed => "snoozed",
+        }
+    }
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "accepted" => TriageStatus::Accepted,
+            "dismissed" => TriageStatus::Dismissed,
+            "snoozed" => TriageStatus::Snoozed,
+            other => return Err(anyhow!("unknown triage status: {other}")),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageRecord {
+    pub finding_id: String,
+    pub status: TriageStatus,
+    pub reason: Option<String>,
+    pub snooze_until: Option<i64>,
+    pub updated_at: i64,
+}
+
 /// Summary row shown in the launcher (one per root, latest scan only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanGroup {
@@ -399,6 +434,82 @@ impl Store {
         conn.execute("DELETE FROM scans WHERE root = ?1", params![root])?;
         Ok(())
     }
+
+    /// Upsert a triage decision for (finding_id, root). Re-calling this with
+    /// a different status overwrites the prior decision. `reason` is required
+    /// for `dismissed`; `snooze_until` is required for `snoozed` but those
+    /// constraints are policed at the IPC boundary, not here.
+    pub fn set_triage(
+        &self,
+        finding_id: &str,
+        root: &str,
+        status: TriageStatus,
+        reason: Option<&str>,
+        snooze_until: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO triage (finding_id, root, status, reason, snooze_until, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(finding_id, root) DO UPDATE SET
+                 status = excluded.status,
+                 reason = excluded.reason,
+                 snooze_until = excluded.snooze_until,
+                 updated_at = excluded.updated_at",
+            params![
+                finding_id,
+                root,
+                status.as_str(),
+                reason,
+                snooze_until,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_triage(&self, finding_id: &str, root: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM triage WHERE finding_id = ?1 AND root = ?2",
+            params![finding_id, root],
+        )?;
+        Ok(())
+    }
+
+    /// Load every triage decision for a root. The returned list is suitable
+    /// for the frontend to index by `finding_id` and overlay on findings as
+    /// they're rendered.
+    pub fn get_triage_for_root(&self, root: &str) -> Result<Vec<TriageRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT finding_id, status, reason, snooze_until, updated_at
+             FROM triage WHERE root = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![root], |row| {
+                let status_str: String = row.get(1)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    status_str,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(finding_id, status, reason, snooze_until, updated_at)| {
+                Ok(TriageRecord {
+                    finding_id,
+                    status: TriageStatus::from_str(&status)?,
+                    reason,
+                    snooze_until,
+                    updated_at,
+                })
+            })
+            .collect()
+    }
 }
 
 struct StoredFinding {
@@ -586,5 +697,44 @@ mod tests {
         let id = store.save_scan(&mk_result(), "completed").unwrap();
         store.delete_scan(&id).unwrap();
         assert!(store.load_scan(&id).is_err());
+    }
+
+    #[test]
+    fn triage_round_trip_and_upsert() {
+        let store = Store::open_in_memory().unwrap();
+        let root = "/tmp/proj";
+
+        // First: dismiss with a reason.
+        store
+            .set_triage("abc", root, TriageStatus::Dismissed, Some("false positive"), None)
+            .unwrap();
+        // Second: same key, switch to accepted (UPSERT).
+        store
+            .set_triage("abc", root, TriageStatus::Accepted, None, None)
+            .unwrap();
+        // Different finding in same root: snooze.
+        store
+            .set_triage("def", root, TriageStatus::Snoozed, None, Some(9_999_999))
+            .unwrap();
+        // Different root: shouldn't appear.
+        store
+            .set_triage("abc", "/tmp/other", TriageStatus::Dismissed, Some("x"), None)
+            .unwrap();
+
+        let mut got = store.get_triage_for_root(root).unwrap();
+        got.sort_by(|a, b| a.finding_id.cmp(&b.finding_id));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].finding_id, "abc");
+        assert_eq!(got[0].status, TriageStatus::Accepted);
+        assert_eq!(got[0].reason, None);
+        assert_eq!(got[1].finding_id, "def");
+        assert_eq!(got[1].status, TriageStatus::Snoozed);
+        assert_eq!(got[1].snooze_until, Some(9_999_999));
+
+        // Clear leaves the other row alone.
+        store.clear_triage("abc", root).unwrap();
+        let remaining = store.get_triage_for_root(root).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].finding_id, "def");
     }
 }

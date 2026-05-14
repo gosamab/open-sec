@@ -146,7 +146,7 @@ open-sec/
 4. ✅ Tool-use agent loop (7 tools sandboxed to scan-root, 25-iter cap)
 5. ✅ Triage pass (Haiku gate, 4 priority buckets, 10/10 fixture calibration)
 6. ✅ Verification pass (Opus + tools, structured exploit schema, 5/5 textbook vulns KEPT, adversarial finding DROPPED)
-7. Patch generation
+7. ✅ Patch generation (Sonnet + tools, exact + fuzzy locate, unified diffs via `diffy`, hardening also patched)
 8. Full pipeline + UI (three-pane workspace)
 9. Persistence (SQLite scans/findings)
 
@@ -266,3 +266,40 @@ declaring a prompt change shipped.
     non-whitespace inner byte to be `"`, i.e. start of a quoted key. Added
     regression test.
 - 56 unit tests green (50 → 56: +4 verify, +2 util).
+
+### Step 7: patch generation
+- Built `scanner/patch.rs`. Schema per CLAUDE.md:
+  `PatchProposal { file, anchor_line, old_block, new_block, explanation }`.
+  Rust wraps with `Patch { finding_id, proposal, located, diff }` where
+  `Located::{Exact, Fuzzy, NotFound}` records how `old_block` was matched.
+- `locate()`: exact `find()` first; on miss, line-by-line trimmed match that
+  returns the file's true substring (not the model's trimmed copy) so the
+  diff edits the real bytes. Refuses pure-whitespace needles.
+- Diff via `diffy::create_patch`. Diffy's default `--- original / +++
+  modified` header is stripped and replaced with a bare `--- <file>` /
+  `+++ <file>` pair tagged with the focus file path (no `a/`/`b/` prefix —
+  avoids double-slash when the path is absolute).
+- Agent loop reuses the detect/verify pattern: Sonnet default, full tool
+  access (read_file/grep/etc), 25-iter cap, 1h cached system prompt. No
+  `temperature` (consistent with verify).
+- `propose_many` filter: KEPT vulns (`verdict.keep()`) AND all hardening
+  items. Dropped vulns are skipped without an API call.
+- Built `bin/patch_cli`: runs detect → verify → patch on a single file,
+  prints per-finding `[exact|fuzzy|not-found]` tag + diff or raw blocks.
+  `--skip-verify` short-circuits the verifier (useful for stressing the
+  patcher on raw detection output).
+- Calibration sweep:
+  - **sqli_express.ts** (CWE-89): exact-match patch. Template literal →
+    parameterized `$1`/`$2` with values array. Explanation names the
+    exploit closure (`1 OR 1=1--`). ✅
+  - **ssrf_fetch.ts** (CWE-918 vuln + CWE-116 hardening): TWO patches
+    emitted in one run. Vuln patch adds an `ALLOWED_SCHEMES` /
+    `ALLOWED_HOSTS` allowlist plus an RFC-1918 / metadata-IP block regex
+    before `fetch`. Hardening patch adds a Content-Type allowlist with
+    utf-8 charset pinning. Both exact-match. ✅
+  - **cross-file/handler.ts** (CWE-89 via no-op `sanitize` stub): exact-
+    match. Patcher used `read_file` on `sanitize.ts` (confirmed via INFO
+    log), then removed the dead `sanitize()` call AND switched to a
+    parameterized query in the same edit. Explanation calls out the
+    removal explicitly. ✅
+- 66 unit tests green (56 → 66: +10 patch).

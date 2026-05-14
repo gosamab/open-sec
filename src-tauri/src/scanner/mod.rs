@@ -2,6 +2,7 @@
 
 pub mod detect;
 pub mod ingest;
+pub mod patch;
 pub mod triage;
 mod util;
 pub mod verify;

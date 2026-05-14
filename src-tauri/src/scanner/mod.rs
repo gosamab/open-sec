@@ -1,6 +1,10 @@
 #![allow(dead_code)] // wired up incrementally as Step 4+ land
 
 pub mod detect;
+pub mod ingest;
+pub mod triage;
+mod util;
+pub mod verify;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

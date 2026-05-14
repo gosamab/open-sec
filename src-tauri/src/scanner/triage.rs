@@ -1,0 +1,364 @@
+//! Triage pass — a Haiku gate that buckets each candidate file into
+//! { high, normal, low, skip }. Detect runs on everything except `skip`,
+//! ordered by bucket. Test files default to `low`; configs/generated/snapshot
+//! files default to `skip`; auth/IO/parsing/DB-heavy code goes `high`.
+
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tracing::{debug, instrument, warn};
+
+use crate::providers::{
+    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, SystemBlock,
+};
+use crate::scanner::ingest::Candidate;
+use crate::scanner::util::{collect_text, extract_json_object};
+
+pub const DEFAULT_TRIAGE_MODEL: &str = "claude-haiku-4-5";
+pub const DEFAULT_TRIAGE_CONCURRENCY: usize = 8;
+const MAX_TOKENS: u32 = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    High,
+    Normal,
+    Low,
+    Skip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageResult {
+    pub priority: Priority,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriagedFile {
+    pub candidate: Candidate,
+    pub result: TriageResult,
+}
+
+const TRIAGE_PROMPT: &str = r#"You are a fast triage filter for a security code-review pipeline. Your job
+is to BUCKET each file into one of four priorities so the expensive detection
+stage focuses on code most likely to contain real vulnerabilities.
+
+You DO NOT identify vulnerabilities here. You only decide whether the
+detection model should look at this file, and how soon.
+
+OUTPUT FORMAT
+
+Output STRICT JSON only — no prose, no markdown fences. The object must be:
+  {"priority": "high" | "normal" | "low" | "skip", "reason": "<= 200 chars"}
+
+BUCKETS
+
+high   — Code that handles external input or crosses a trust boundary:
+         HTTP/RPC handlers, request parsers, auth/session logic, DB query
+         builders, command/process execution, file/path operations, network
+         clients (incl. webhook receivers), deserializers, template engines,
+         crypto/secret handling, IPC entry points. Anything where a clear
+         source → sink could plausibly exist.
+
+normal — First-party application/library code that is not obviously a
+         trust boundary but could still hide bugs: domain logic, internal
+         APIs, data transformations, business-rule code, utilities that
+         touch the above categories indirectly.
+
+low    — RESERVED for test files (unit/integration/e2e), example/demo code,
+         fixtures, mocks, storybook/playground files. Do not use `low` for
+         any other reason. A file that has no apparent trust boundary but is
+         real first-party application/library code is `normal`, NOT `low`.
+
+skip   — Files with no meaningful executable security surface:
+         generated code (marked as such, or matching a clear generator
+         pattern), pure type/interface declarations with no logic, lockfile
+         contents, vendored copies that slipped past the directory filter,
+         snapshot files, files that are entirely comments/data, empty
+         scaffolds, build configs that just re-export framework defaults.
+
+RULES
+
+- Be DECISIVE. Pick exactly one bucket. Do not waffle.
+- "I don't know what this does" defaults to `normal`, not `skip` — only
+  `skip` for files that are clearly inert.
+- Test files default to `low` even if they exercise risky APIs (the test
+  exists because the prod code exists; we'll find the bug in the prod code).
+  Promote a test to `normal` only if it appears to contain real logic that
+  isn't being tested elsewhere.
+- A pure-logic file with no I/O and no external input is `normal`, never
+  `low`. Pure-logic bugs (off-by-one, wrong sign, mis-applied discount) are
+  in scope for detection; the only reason `low` exists is to drain the
+  queue of test/example files last.
+- Generated code (e.g. "// @generated", "DO NOT EDIT", protobuf/openapi/
+  prisma output) → `skip`.
+- `reason` must be a short concrete justification grounded in what you saw
+  in the file, not a restatement of the bucket definition."#;
+
+#[derive(Deserialize)]
+struct RawResult {
+    priority: Priority,
+    #[serde(default)]
+    reason: String,
+}
+
+/// Triage a single file. Returns the LLM's bucket decision. Used directly by
+/// the calibration CLI and via `triage_many` for batched scans.
+#[instrument(skip(provider, source), fields(path = %rel_path, bytes = source.len()))]
+pub async fn triage_one(
+    rel_path: &str,
+    source: &str,
+    provider: &dyn Provider,
+    model: &str,
+) -> Result<TriageResult> {
+    let mut req = GenerationRequest::new(model, MAX_TOKENS);
+    req.temperature = Some(0.0);
+    req.system
+        .push(SystemBlock::text(TRIAGE_PROMPT).with_cache(CacheControl::ephemeral_1h()));
+    req.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: format!("File: {rel_path}\n\n{source}"),
+        }],
+    });
+
+    let resp = provider
+        .generate(req)
+        .await
+        .context("anthropic generate call failed")?;
+
+    let text = collect_text(&resp.content);
+    debug!(chars = text.len(), "received triage response");
+    parse_result(&text)
+}
+
+fn parse_result(text: &str) -> Result<TriageResult> {
+    let json = extract_json_object(text)
+        .ok_or_else(|| anyhow!("model response did not contain a JSON object: {text}"))?;
+    let raw: RawResult = serde_json::from_str(json)
+        .with_context(|| format!("parsing triage JSON: {json}"))?;
+    Ok(TriageResult {
+        priority: raw.priority,
+        reason: raw.reason,
+    })
+}
+
+/// Triage every candidate in parallel under a semaphore. Errors on individual
+/// files are logged and the file is dropped from the result; we don't fail the
+/// whole scan because one file's triage call hiccupped.
+pub async fn triage_many(
+    candidates: Vec<Candidate>,
+    provider: Arc<dyn Provider>,
+    model: &str,
+    concurrency: usize,
+) -> Vec<TriagedFile> {
+    let permits = Arc::new(Semaphore::new(concurrency.max(1)));
+    let model = model.to_string();
+    let mut set: JoinSet<Option<TriagedFile>> = JoinSet::new();
+
+    for candidate in candidates {
+        let permits = permits.clone();
+        let provider = provider.clone();
+        let model = model.clone();
+        set.spawn(async move {
+            let _permit = permits.acquire_owned().await.ok()?;
+            let source = match tokio::fs::read_to_string(&candidate.path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(path = %candidate.rel_path, error = %e, "skipping: read failed");
+                    return None;
+                }
+            };
+            match triage_one(&candidate.rel_path, &source, provider.as_ref(), &model).await {
+                Ok(result) => Some(TriagedFile { candidate, result }),
+                Err(e) => {
+                    warn!(path = %candidate.rel_path, error = %e, "triage call failed");
+                    None
+                }
+            }
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some(t)) = joined {
+            out.push(t);
+        }
+    }
+    // Stable ordering by priority bucket then path, so downstream queue order
+    // is deterministic.
+    out.sort_by(|a, b| {
+        priority_rank(a.result.priority)
+            .cmp(&priority_rank(b.result.priority))
+            .then_with(|| a.candidate.rel_path.cmp(&b.candidate.rel_path))
+    });
+    out
+}
+
+fn priority_rank(p: Priority) -> u8 {
+    match p {
+        Priority::High => 0,
+        Priority::Normal => 1,
+        Priority::Low => 2,
+        Priority::Skip => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ProviderResult;
+    use crate::providers::{Response, StopReason, StreamEvent, Usage};
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    struct FixedProvider {
+        body: String,
+        /// Tracks max concurrent in-flight calls so we can assert the
+        /// semaphore actually limits parallelism.
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+        seen: Mutex<usize>,
+    }
+
+    impl FixedProvider {
+        fn new(body: &str, delay_ms: u64) -> Self {
+            Self {
+                body: body.to_string(),
+                in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                delay: Duration::from_millis(delay_ms),
+                seen: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FixedProvider {
+        fn name(&self) -> &'static str {
+            "fixed"
+        }
+        async fn generate(&self, _req: GenerationRequest) -> ProviderResult<Response> {
+            use std::sync::atomic::Ordering;
+            let n = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(n, Ordering::SeqCst);
+            *self.seen.lock().unwrap() += 1;
+            tokio::time::sleep(self.delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(Response {
+                id: "msg".into(),
+                model: "fixed".into(),
+                content: vec![ContentBlock::Text {
+                    text: self.body.clone(),
+                }],
+                stop_reason: Some(StopReason::EndTurn),
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+        async fn stream(
+            &self,
+            _req: GenerationRequest,
+        ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn triage_one_parses_bucket_and_reason() {
+        let provider = FixedProvider::new(
+            r#"{"priority":"high","reason":"http handler reads body, queries DB"}"#,
+            0,
+        );
+        let r = triage_one("src/login.ts", "// code", &provider, "fixed")
+            .await
+            .unwrap();
+        assert_eq!(r.priority, Priority::High);
+        assert!(r.reason.contains("http handler"));
+    }
+
+    #[tokio::test]
+    async fn triage_one_strips_markdown_fence() {
+        let provider = FixedProvider::new(
+            "```json\n{\"priority\":\"low\",\"reason\":\"test file\"}\n```",
+            0,
+        );
+        let r = triage_one("src/x.test.ts", "// code", &provider, "fixed")
+            .await
+            .unwrap();
+        assert_eq!(r.priority, Priority::Low);
+    }
+
+    #[tokio::test]
+    async fn triage_many_respects_concurrency_cap() {
+        let tmp = TempDir::new().unwrap();
+        let mut candidates = Vec::new();
+        for i in 0..20 {
+            let p = tmp.path().join(format!("f{i}.ts"));
+            std::fs::write(&p, b"x\n").unwrap();
+            candidates.push(Candidate {
+                path: p,
+                rel_path: format!("f{i}.ts"),
+                size_bytes: 2,
+                line_count: 1,
+            });
+        }
+        let provider = Arc::new(FixedProvider::new(
+            r#"{"priority":"normal","reason":"ok"}"#,
+            30,
+        ));
+        let peak = provider.peak.clone();
+        let seen = Arc::clone(&provider) as Arc<dyn Provider>;
+        let out = triage_many(candidates, seen, "fixed", 4).await;
+        assert_eq!(out.len(), 20);
+        // We allowed 4 concurrent permits; peak must not exceed that.
+        let observed_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            observed_peak <= 4,
+            "peak concurrency {observed_peak} exceeded permit cap 4"
+        );
+        // And we must have hit *some* parallelism — otherwise the test isn't
+        // really verifying the semaphore. With 20 files and 30ms delay we
+        // should comfortably see >1.
+        assert!(
+            observed_peak > 1,
+            "peak concurrency {observed_peak} suspiciously low; test isn't exercising parallelism"
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_many_sorts_by_priority_then_path() {
+        let tmp = TempDir::new().unwrap();
+        let mk = |name: &str| {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, b"x").unwrap();
+            Candidate {
+                path: p,
+                rel_path: name.to_string(),
+                size_bytes: 1,
+                line_count: 1,
+            }
+        };
+        // Scripted to give every file the same bucket — verifies path tiebreak.
+        let provider = Arc::new(FixedProvider::new(
+            r#"{"priority":"normal","reason":"ok"}"#,
+            0,
+        ));
+        let out = triage_many(
+            vec![mk("z.ts"), mk("a.ts"), mk("m.ts")],
+            Arc::clone(&provider) as Arc<dyn Provider>,
+            "fixed",
+            4,
+        )
+        .await;
+        let names: Vec<_> = out.iter().map(|t| t.candidate.rel_path.clone()).collect();
+        assert_eq!(names, vec!["a.ts", "m.ts", "z.ts"]);
+    }
+}

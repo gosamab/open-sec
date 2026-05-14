@@ -1,0 +1,13 @@
+{
+  "id": "0000000000000000",
+  "kind": "vuln",
+  "severity": "high",
+  "cwe": "CWE-89",
+  "owasp": "A03:2021",
+  "title": "SQL Injection via req.params.id interpolated into query",
+  "file": "/Users/oazab/open-sec/fixtures/adversarial/handler.ts",
+  "line_start": 14,
+  "line_end": 15,
+  "description": "The route handler interpolates req.params.id directly into a SQL string and passes it to db.query() without parameterization.",
+  "data_flow": "req.params.id (HTTP path param) -> template literal -> db.query() sink"
+}

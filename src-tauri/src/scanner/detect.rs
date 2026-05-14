@@ -8,6 +8,7 @@ use crate::providers::{
     CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
     SystemBlock,
 };
+use crate::scanner::util::{collect_text, extract_json_object};
 use crate::scanner::Finding;
 use crate::tools;
 
@@ -262,57 +263,6 @@ fn finalize(text: &str, file_label: &str) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-fn collect_text(content: &[ContentBlock]) -> String {
-    let mut out = String::new();
-    for block in content {
-        if let ContentBlock::Text { text } = block {
-            out.push_str(text);
-        }
-    }
-    out
-}
-
-/// Extract a top-level JSON object from arbitrary text. Strips ```json fences
-/// the model occasionally adds despite being told not to.
-fn extract_json_object(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    let stripped = strip_fence(trimmed).unwrap_or(trimmed);
-    let start = stripped.find('{')?;
-    let end = matching_close(&stripped[start..])? + start;
-    Some(&stripped[start..=end])
-}
-
-fn strip_fence(s: &str) -> Option<&str> {
-    let s = s.strip_prefix("```json")?.trim_start();
-    s.strip_suffix("```").map(str::trim_end)
-}
-
-fn matching_close(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_string => escaped = true,
-            b'"' => in_string = !in_string,
-            b'{' if !in_string => depth += 1,
-            b'}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn with_line_numbers(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let width = lines.len().to_string().len().max(3);
@@ -480,33 +430,6 @@ mod agent_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_plain_json() {
-        let text = r#"{"findings": []}"#;
-        assert_eq!(extract_json_object(text), Some(r#"{"findings": []}"#));
-    }
-
-    #[test]
-    fn extract_strips_markdown_fence() {
-        let text = "```json\n{\"findings\": []}\n```";
-        assert_eq!(extract_json_object(text), Some("{\"findings\": []}"));
-    }
-
-    #[test]
-    fn extract_handles_preamble() {
-        let text = "Here's the JSON:\n\n{\"findings\": [{\"a\":1}]}\n\nThanks!";
-        assert_eq!(
-            extract_json_object(text),
-            Some("{\"findings\": [{\"a\":1}]}")
-        );
-    }
-
-    #[test]
-    fn extract_handles_nested_braces_and_strings() {
-        let text = r#"{"findings": [{"description": "uses { and } literals"}]}"#;
-        assert_eq!(extract_json_object(text), Some(text));
-    }
 
     #[test]
     fn line_numbers_pad_to_width() {

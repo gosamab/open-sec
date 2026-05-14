@@ -147,7 +147,9 @@ open-sec/
 5. ✅ Triage pass (Haiku gate, 4 priority buckets, 10/10 fixture calibration)
 6. ✅ Verification pass (Opus + tools, structured exploit schema, 5/5 textbook vulns KEPT, adversarial finding DROPPED)
 7. ✅ Patch generation (Sonnet + tools, exact + fuzzy locate, unified diffs via `diffy`, hardening also patched)
-8. Full pipeline + UI (three-pane workspace)
+8. ⏳ Full pipeline + UI (three-pane workspace)
+   - ✅ 8a. Orchestrator + `pipeline_cli` (end-to-end: ingest → triage → detect → verify → patch)
+   - 8b. SvelteKit three-pane UI on top of the orchestrator
 9. Persistence (SQLite scans/findings)
 
 ## Calibration log
@@ -303,3 +305,31 @@ declaring a prompt change shipped.
     parameterized query in the same edit. Explanation calls out the
     removal explicitly. ✅
 - 66 unit tests green (56 → 66: +10 patch).
+
+### Step 8a: pipeline orchestrator
+- Built `scanner/orchestrate.rs::run_scan(root, provider, config) ->
+  ScanResult`. Chains ingest → triage → detect → verify → patch
+  sequentially (each stage gets the full output of the previous), with
+  per-stage parallelism via `tokio::Semaphore` at the concurrencies locked
+  in CLAUDE.md (triage=8, detect=4, verify=2, patch=4).
+- `ScanResult` carries every intermediate stage's output —
+  `ingest`/`triaged`/`findings_by_file`/`verified`/`patches` — so the UI
+  (Step 8b) can render funnels and per-file detail without re-running
+  anything. `--json` flag on `pipeline_cli` emits the whole result.
+- Triage filter: `priority != Skip` files flow into detect; everything else
+  is dropped. Test/example/low files still get detected (they're queued
+  last only for ordering; we don't actually queue by priority here yet —
+  that's a future UI concern).
+- Detect errors are logged + skipped, not fatal. Verify/patch errors per
+  finding likewise pass through with `verdict: None` / no patch.
+- Built `bin/pipeline_cli`: stderr gets the per-stage funnel summary +
+  `tracing` logs; stdout gets the kept-findings table and per-finding diff
+  blocks (or the raw `ScanResult` JSON in `--json` mode). Clean separation
+  for piping.
+- End-to-end smoke on `fixtures/vulnerable/` (5 files): ingest=5,
+  triage=5 high, detect=6 findings across 5 files, verify=5 KEPT + 1
+  hardening passthrough, patch=6 proposals all exact-match. Numbers match
+  per-stage CLI calibration runs exactly — orchestrator is wired right.
+- Out of scope here (deferred to UI step): budget caps, >1000-file
+  confirmation, cancellation that "keeps partial findings". The
+  >1000 case currently just emits a `tracing` warn.

@@ -164,8 +164,11 @@
 
 	<main class="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 pb-12 pt-4">
 		<!-- Branding -->
-		<div class="space-y-1">
-			<h1 class="text-3xl font-semibold tracking-tight">open-sec</h1>
+		<div class="space-y-2">
+			<div class="flex items-center gap-3">
+				<img src="/logo.png" alt="" width="40" height="40" class="rounded-lg" />
+				<h1 class="text-3xl font-semibold tracking-tight">Open Security</h1>
+			</div>
 			<p class="text-muted-foreground text-sm">
 				Local-first security code scanner. Pick a folder to begin.
 			</p>

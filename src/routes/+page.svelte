@@ -1228,7 +1228,8 @@
 				<path d="m15 18-6-6 6-6" />
 			</svg>
 		</button>
-		<h1 class="text-base font-semibold tracking-tight">open-sec</h1>
+		<img src="/logo.png" alt="" width="20" height="20" class="rounded-[5px]" />
+		<h1 class="text-base font-semibold tracking-tight">Open Security</h1>
 		<div class="bg-border h-5 w-px"></div>
 		<div class="text-foreground/80 flex flex-1 items-center gap-2 truncate font-mono text-xs">
 			<span class="truncate" title={root}>{root}</span>

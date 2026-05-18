@@ -35,8 +35,6 @@ bun run tauri build
 
 The `.app` and `.dmg` land in `src-tauri/target/release/bundle/`. Drag to Applications.
 
-> First launch on an unsigned local build: right-click → **Open** to bypass Gatekeeper.
-
 ## Usage
 
 1. Launch open-sec and paste your Anthropic API key.
@@ -60,6 +58,10 @@ cargo test --lib       # pipeline tests
 - **Frontend** — SvelteKit + TypeScript + Tailwind v4 + shadcn-svelte
 - **Backend** — Rust + tokio, `reqwest`, `rusqlite`, `tree-sitter`, `diffy`, `keyring`
 - **Models** — Claude `haiku-4-5` / `sonnet-4-6` / `opus-4-7`
+
+## Privacy
+
+Source code you scan is sent to the Anthropic API. Nothing else leaves your machine — no telemetry, no analytics. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## License
 

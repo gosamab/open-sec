@@ -2,7 +2,7 @@
 name = "open-sec"
 version = "0.1.0"
 description = "AI-powered security code scanner"
-authors = ["open-sec contributors"]
+authors = ["Osama Azab <gosamab@hotmail.com>"]
 license = "MIT"
 repository = ""
 edition = "2021"

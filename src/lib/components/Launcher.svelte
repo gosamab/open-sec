@@ -2,6 +2,7 @@
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { Button } from '$lib/components/ui/button';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import logo from '$lib/assets/logo.png';
 	import {
 		deleteScansForRoot,
 		hasAnthropicKey,
@@ -95,14 +96,16 @@
 	}
 
 	async function clearAll() {
-		// Sequence individual deletes — simpler than adding a new IPC for this.
-		for (const g of groups) {
-			try {
-				await deleteScansForRoot(g.root);
-			} catch (e) {
-				console.error('deleteScansForRoot failed', g.root, e);
-			}
-		}
+		// Fan out the deletes in parallel — each is an independent SQLite
+		// transaction so order doesn't matter, and the latency adds up on a
+		// long Recents list.
+		await Promise.all(
+			groups.map((g) =>
+				deleteScansForRoot(g.root).catch((e) =>
+					console.error('deleteScansForRoot failed', g.root, e)
+				)
+			)
+		);
 		await reloadGroups();
 	}
 
@@ -134,7 +137,7 @@
 		<!-- Branding -->
 		<div class="space-y-2">
 			<div class="flex items-center gap-3">
-				<img src="/logo.png" alt="" width="40" height="40" class="rounded-lg" />
+				<img src={logo} alt="" width="40" height="40" class="rounded-lg" />
 				<h1 class="text-3xl font-semibold tracking-tight">Open Security</h1>
 			</div>
 			<p class="text-muted-foreground text-sm">

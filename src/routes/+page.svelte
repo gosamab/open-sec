@@ -7,12 +7,13 @@
 	import Launcher from '$lib/components/Launcher.svelte';
 	import Settings from '$lib/components/Settings.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import logo from '$lib/assets/logo.png';
 	import { renderMd, renderInlineMd } from '$lib/markdown';
 	import { asScanConfig, settings } from '$lib/settings.svelte';
 	import { highlightCode, highlightDiff } from '$lib/shiki.svelte';
-	import { theme } from '$lib/theme.svelte';
 	import {
 		EMPTY_STAGE_USAGE,
+		EMPTY_STAGE_DURATIONS,
 		applyPatch,
 		cancelScan,
 		clearTriage,
@@ -40,6 +41,7 @@
 		type ScanResult,
 		type Severity,
 		type SkipReason,
+		type StageDurations,
 		type StageUsage,
 		type TriagedFile,
 		type TriageRecord,
@@ -71,6 +73,11 @@
 	let verdictById = $state<Map<string, Verdict | null>>(new Map());
 	let patchById = $state<Map<string, Patch>>(new Map());
 	let usage = $state<StageUsage>(EMPTY_STAGE_USAGE);
+	let durations = $state<StageDurations>(EMPTY_STAGE_DURATIONS);
+	/** Latest "rate-limited, retrying in Xs" notice from the provider, or
+	 *  null. Cleared on the next non-rate-limited event so a transient
+	 *  retry doesn't stick in the status bar after the scan resumes. */
+	let rateLimitNotice = $state<{ attempt: number; retry_after_secs: number } | null>(null);
 	let scanResult = $state<ScanResult | null>(null);
 
 	/** Triage decisions keyed by finding_id (scoped to the current root). */
@@ -155,13 +162,17 @@
 		applyBusy = true;
 		applyError = null;
 		try {
-			await applyPatch(
+			const result = await applyPatch(
 				selectedFinding.id,
 				root,
 				selectedPatch.proposal.file,
 				selectedPatch.proposal.old_block,
 				selectedPatch.proposal.new_block
 			);
+			if (result.located.kind === 'not_found' || result.bytes_written === 0) {
+				applyError = 'Patch could not be located in the file — nothing was written.';
+				return;
+			}
 			const next = new Set(appliedPatchIds);
 			next.add(selectedFinding.id);
 			appliedPatchIds = next;
@@ -173,7 +184,23 @@
 	}
 	let dismissDraftFor = $state<string | null>(null);
 	let dismissReason = $state('');
-	let hideDismissed = $state(true);
+	// `hideDismissed` is a long-lived UI preference (unlike `filter` or
+	// `expandedFolders`, which are tied to the current scan), so it survives
+	// reloads via localStorage.
+	const HIDE_DISMISSED_KEY = 'open-sec:hide-dismissed';
+	let hideDismissed = $state<boolean>(
+		typeof window !== 'undefined'
+			? window.localStorage.getItem(HIDE_DISMISSED_KEY) !== 'false'
+			: true
+	);
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		try {
+			window.localStorage.setItem(HIDE_DISMISSED_KEY, String(hideDismissed));
+		} catch {
+			// quota / disabled — silent
+		}
+	});
 
 	let selectedFile = $state<string | null>(null);
 	let selectedFindingId = $state<string | null>(null);
@@ -239,6 +266,16 @@
 				}
 				case 'usage_update':
 					usage = ev.usage;
+					rateLimitNotice = null;
+					break;
+				case 'durations_update':
+					durations = ev.durations;
+					break;
+				case 'rate_limited':
+					rateLimitNotice = {
+						attempt: ev.attempt,
+						retry_after_secs: ev.retry_after_secs
+					};
 					break;
 			}
 		});
@@ -262,13 +299,22 @@
 		verdictById = new Map();
 		patchById = new Map();
 		usage = EMPTY_STAGE_USAGE;
+		durations = EMPTY_STAGE_DURATIONS;
+		rateLimitNotice = null;
 		scanResult = null;
 		selectedFile = null;
 		selectedFindingId = null;
+		// Clear per-finding session state too — stale badges from the previous
+		// run shouldn't paint onto freshly-emitted findings while the scan is
+		// in flight. Both maps are repopulated post-scan from the DB.
+		triageById = new Map();
+		appliedPatchIds = new Set();
 		try {
 			scanResult = await runPipeline(root, asScanConfig(settings.value));
 			resultRoot = root;
-			stage = cancelling ? 'cancelled' : 'done';
+			// Trust the backend-supplied status over our local `cancelling`
+			// flag — the latter can race late-arriving stage events.
+			stage = scanResult.status === 'cancelled' ? 'cancelled' : 'done';
 			await reloadTriageForCurrentRoot();
 			await reloadAppliedForCurrentRoot();
 		} catch (e) {
@@ -282,7 +328,7 @@
 
 	$effect(() => {
 		if (!exportMenuOpen) return;
-		const onDoc = (e: MouseEvent) => {
+		const onDoc = (e: PointerEvent) => {
 			if (exportMenuRef && !exportMenuRef.contains(e.target as Node)) {
 				exportMenuOpen = false;
 			}
@@ -290,10 +336,10 @@
 		const onEsc = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') exportMenuOpen = false;
 		};
-		document.addEventListener('mousedown', onDoc);
+		document.addEventListener('pointerdown', onDoc);
 		document.addEventListener('keydown', onEsc);
 		return () => {
-			document.removeEventListener('mousedown', onDoc);
+			document.removeEventListener('pointerdown', onDoc);
 			document.removeEventListener('keydown', onEsc);
 		};
 	});
@@ -374,6 +420,8 @@
 		verdictById = new Map();
 		patchById = new Map();
 		usage = EMPTY_STAGE_USAGE;
+		durations = EMPTY_STAGE_DURATIONS;
+		rateLimitNotice = null;
 		scanResult = null;
 		selectedFile = null;
 		selectedFindingId = null;
@@ -390,6 +438,8 @@
 		verdictById = new Map();
 		patchById = new Map();
 		usage = EMPTY_STAGE_USAGE;
+		durations = EMPTY_STAGE_DURATIONS;
+		rateLimitNotice = null;
 		scanResult = null;
 		selectedFile = null;
 		selectedFindingId = null;
@@ -466,9 +516,11 @@
 		for (const p of r.patches) pbi.set(p.finding_id, p);
 		patchById = pbi;
 		usage = r.usage;
+		durations = r.durations ?? EMPTY_STAGE_DURATIONS;
+		rateLimitNotice = null;
 		scanResult = r;
 		resultRoot = r.root;
-		stage = 'done';
+		stage = r.status === 'cancelled' ? 'cancelled' : 'done';
 	}
 
 	function backToLauncher() {
@@ -1026,6 +1078,30 @@
 
 	let fileTree = $derived.by(() => nestFiles(buildFileNodes()));
 
+	// Evict expanded-folder entries that no longer exist in the tree. Without
+	// this, paths from a prior scan accumulate and the Set grows unbounded.
+	// Skip while scanning so we don't yank state mid-flight.
+	$effect(() => {
+		if (scanning) return;
+		const alive = new Set<string>();
+		const visit = (children: TreeNode[]) => {
+			for (const c of children) {
+				if (c.type === 'folder') {
+					alive.add(c.path);
+					visit(c.children);
+				}
+			}
+		};
+		visit(fileTree);
+		let changed = false;
+		const next = new Set<string>();
+		for (const p of expandedFolders) {
+			if (alive.has(p)) next.add(p);
+			else changed = true;
+		}
+		if (changed) expandedFolders = next;
+	});
+
 	type VisibleRow = { node: TreeNode; depth: number };
 	let visibleTree = $derived.by(() => {
 		const out: VisibleRow[] = [];
@@ -1094,15 +1170,30 @@
 		return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
 	}
 
+	/** Format a millisecond duration as `12ms` / `3.4s` / `1m 23s` /
+	 *  `1h 5m`. Below a second the precision matters; above an hour the
+	 *  seconds become noise. */
+	function formatDuration(ms: number): string {
+		if (ms < 1000) return `${Math.round(ms)}ms`;
+		const totalSec = ms / 1000;
+		if (totalSec < 60) return `${totalSec.toFixed(totalSec < 10 ? 1 : 0)}s`;
+		const totalMin = Math.floor(totalSec / 60);
+		const secs = Math.round(totalSec - totalMin * 60);
+		if (totalMin < 60) return `${totalMin}m ${secs}s`;
+		const hr = Math.floor(totalMin / 60);
+		const min = totalMin - hr * 60;
+		return `${hr}h ${min}m`;
+	}
+
 	let totalTokens = $derived(
 		usage.total.input_tokens + usage.total.output_tokens + usage.total.cache_read_input_tokens
 	);
 
 	let usageRows = $derived.by(() => [
-		{ name: 'triage', u: usage.triage },
-		{ name: 'detect', u: usage.detect },
-		{ name: 'verify', u: usage.verify },
-		{ name: 'patch', u: usage.patch }
+		{ name: 'triage', u: usage.triage, ms: durations.triage_ms },
+		{ name: 'detect', u: usage.detect, ms: durations.detect_ms },
+		{ name: 'verify', u: usage.verify, ms: durations.verify_ms },
+		{ name: 'patch', u: usage.patch, ms: durations.patch_ms }
 	]);
 
 	type StageSlot = { key: string; label: string; model: string | null };
@@ -1274,7 +1365,9 @@
 
 	function scrollFindingIntoView(id: string) {
 		queueMicrotask(() => {
-			const el = document.querySelector<HTMLElement>(`[data-finding-id="${id}"]`);
+			const el = document.querySelector<HTMLElement>(
+				`[data-finding-id="${CSS.escape(id)}"]`
+			);
 			el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 		});
 	}
@@ -1312,10 +1405,9 @@
 			return;
 		}
 		let cancelled = false;
-		// Trigger re-highlight on theme change too (CSS handles the swap, but
-		// we want the effect to be reactive on theme so any future per-theme
-		// processing kicks in).
-		void theme.resolved;
+		// Shiki emits both light + dark palettes inline; the .dark class
+		// override in layout.css swaps them at runtime, so we don't depend on
+		// theme.resolved here.
 		highlightDiff(diff)
 			.then((html) => {
 				if (!cancelled) diffHtml = html;
@@ -1335,6 +1427,14 @@
 	let excerpt = $state<Excerpt | null>(null);
 	let excerptHtml = $state<string | null>(null);
 	let excerptError = $state<string | null>(null);
+	// Reset any per-finding action errors when the user moves focus to a
+	// different finding. Errors are scoped to a single attempt; carrying them
+	// across selections just confuses people.
+	$effect(() => {
+		void selectedFindingId;
+		applyError = null;
+		regenError = null;
+	});
 	$effect(() => {
 		const f = selectedFinding;
 		if (!f) {
@@ -1400,7 +1500,7 @@
 				<path d="m15 18-6-6 6-6" />
 			</svg>
 		</button>
-		<img src="/logo.png" alt="" width="20" height="20" class="rounded-[5px]" />
+		<img src={logo} alt="" width="20" height="20" class="rounded-[5px]" />
 		<h1 class="text-base font-semibold tracking-tight">Open Security</h1>
 		<div class="bg-border h-5 w-px"></div>
 		<div class="text-foreground/80 flex flex-1 items-center gap-2 truncate font-mono text-xs">
@@ -1526,6 +1626,17 @@
 					</li>
 				{/each}
 			</ol>
+			{#if rateLimitNotice}
+				<span class="shrink-0 inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 font-mono text-xs text-amber-700 dark:text-amber-300" title="Anthropic rate limit; auto-retrying">
+					<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>
+					rate-limited · retry #{rateLimitNotice.attempt} in {rateLimitNotice.retry_after_secs}s
+				</span>
+			{/if}
+			{#if durations.total_ms > 0}
+				<span class="text-muted-foreground shrink-0 font-mono text-xs" title="Total scan duration">
+					{formatDuration(durations.total_ms)}
+				</span>
+			{/if}
 			<span class="text-muted-foreground shrink-0 font-mono text-xs">{stage}</span>
 		</div>
 	{/if}
@@ -1658,7 +1769,7 @@
 						<span class="font-medium">All files</span>
 						<span class="text-muted-foreground">{totals.total}</span>
 					</button>
-					{#each visibleTree as row, idx (row.node.path + ':' + idx)}
+					{#each visibleTree as row (row.node.path)}
 						{#if row.node.type === 'folder'}
 							{@const f = row.node}
 							{@const expanded = expandedFolders.has(f.path)}
@@ -2431,7 +2542,12 @@
 						{/if}
 						<div class="space-y-4">
 							<div class="space-y-1">
-								<h2 class="text-base font-medium">Scan summary</h2>
+								<div class="flex items-center gap-2">
+									<h2 class="text-base font-medium">Scan summary</h2>
+									{#if scanResult?.status === 'cancelled'}
+										<Badge class="bg-amber-500/15 text-amber-700 dark:text-amber-300">cancelled</Badge>
+									{/if}
+								</div>
 								<p class="text-muted-foreground break-all font-mono text-xs" title={root}>
 									{root || '—'}
 								</p>
@@ -2444,6 +2560,10 @@
 								</dd>
 								<dt class="text-muted-foreground py-0.5">Patches drafted</dt>
 								<dd class="py-0.5 text-right font-mono tabular-nums">{patchById.size}</dd>
+								{#if durations.total_ms > 0}
+									<dt class="text-muted-foreground py-0.5">Duration</dt>
+									<dd class="py-0.5 text-right font-mono tabular-nums">{formatDuration(durations.total_ms)}</dd>
+								{/if}
 							</dl>
 
 							{#if allFindings.length > 0}
@@ -2518,7 +2638,7 @@
 							</div>
 						</div>
 
-						{#if totalTokens > 0}
+						{#if totalTokens > 0 || durations.total_ms > 0}
 							<details class="group border-border overflow-hidden rounded-md border">
 								<summary class="hover:bg-muted/30 flex cursor-pointer items-center justify-between px-3 py-2 [&::-webkit-details-marker]:hidden">
 									<div class="flex items-center gap-2">
@@ -2549,16 +2669,27 @@
 												<th class="px-3 py-1.5 text-left font-medium">Stage</th>
 												<th class="px-2 py-1.5 text-right font-medium">In</th>
 												<th class="px-2 py-1.5 text-right font-medium">Out</th>
-												<th class="px-3 py-1.5 text-right font-medium">Cache</th>
+												<th class="px-2 py-1.5 text-right font-medium">Cache</th>
+												<th class="px-3 py-1.5 text-right font-medium">Time</th>
 											</tr>
 										</thead>
 										<tbody class="font-mono">
+											{#if durations.ingest_ms > 0}
+												<tr class="border-border/30 border-b last:border-b-0 text-muted-foreground/80">
+													<td class="px-3 py-1">ingest</td>
+													<td class="px-2 py-1 text-right tabular-nums">—</td>
+													<td class="px-2 py-1 text-right tabular-nums">—</td>
+													<td class="px-2 py-1 text-right tabular-nums">—</td>
+													<td class="px-3 py-1 text-right tabular-nums">{formatDuration(durations.ingest_ms)}</td>
+												</tr>
+											{/if}
 											{#each usageRows as row (row.name)}
 												<tr class="border-border/30 border-b last:border-b-0">
 													<td class="px-3 py-1">{row.name}</td>
 													<td class="px-2 py-1 text-right tabular-nums">{row.u.input_tokens.toLocaleString()}</td>
 													<td class="px-2 py-1 text-right tabular-nums">{row.u.output_tokens.toLocaleString()}</td>
-													<td class="text-muted-foreground px-3 py-1 text-right tabular-nums">{row.u.cache_read_input_tokens.toLocaleString()}</td>
+													<td class="text-muted-foreground px-2 py-1 text-right tabular-nums">{row.u.cache_read_input_tokens.toLocaleString()}</td>
+													<td class="px-3 py-1 text-right tabular-nums">{row.ms > 0 ? formatDuration(row.ms) : '—'}</td>
 												</tr>
 											{/each}
 										</tbody>
@@ -2567,7 +2698,8 @@
 												<td class="px-3 py-1.5">Total</td>
 												<td class="px-2 py-1.5 text-right tabular-nums">{usage.total.input_tokens.toLocaleString()}</td>
 												<td class="px-2 py-1.5 text-right tabular-nums">{usage.total.output_tokens.toLocaleString()}</td>
-												<td class="text-muted-foreground px-3 py-1.5 text-right tabular-nums">{usage.total.cache_read_input_tokens.toLocaleString()}</td>
+												<td class="text-muted-foreground px-2 py-1.5 text-right tabular-nums">{usage.total.cache_read_input_tokens.toLocaleString()}</td>
+												<td class="px-3 py-1.5 text-right tabular-nums">{durations.total_ms > 0 ? formatDuration(durations.total_ms) : '—'}</td>
 											</tr>
 										</tfoot>
 									</table>

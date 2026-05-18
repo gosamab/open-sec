@@ -76,11 +76,13 @@ pub fn run() {
             commands::save_text_file,
             commands::list_scan_groups,
             commands::load_scan,
+            commands::get_latest_scan_for,
             commands::delete_scan,
             commands::delete_scans_for_root,
             commands::set_triage,
             commands::clear_triage,
             commands::get_triage_for_root,
+            commands::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

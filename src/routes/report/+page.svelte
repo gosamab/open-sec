@@ -89,8 +89,14 @@
 			);
 			diffHtmlByFindingId = map;
 			if (auto) {
-				// Wait two animation frames so Shiki's HTML is rendered before
-				// the browser snapshots for the print preview.
+				// Wait for fonts and a paint so Shiki's HTML and our custom
+				// metrics are settled before the browser snapshots for print.
+				// Otherwise headings can shift between preview and printed PDF.
+				try {
+					await document.fonts.ready;
+				} catch {
+					// no-op: older webviews don't expose document.fonts.ready
+				}
 				requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
 			}
 		} catch (e) {

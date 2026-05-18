@@ -6,16 +6,18 @@
 
 	$effect(() => {
 		if (!menuOpen) return;
-		const onDoc = (e: MouseEvent) => {
+		// `pointerdown` covers mouse, touch, and pen — `mousedown` alone
+		// misses tap-to-close on touch hardware.
+		const onDoc = (e: PointerEvent) => {
 			if (menuRef && !menuRef.contains(e.target as Node)) menuOpen = false;
 		};
 		const onEsc = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') menuOpen = false;
 		};
-		document.addEventListener('mousedown', onDoc);
+		document.addEventListener('pointerdown', onDoc);
 		document.addEventListener('keydown', onEsc);
 		return () => {
-			document.removeEventListener('mousedown', onDoc);
+			document.removeEventListener('pointerdown', onDoc);
 			document.removeEventListener('keydown', onEsc);
 		};
 	});

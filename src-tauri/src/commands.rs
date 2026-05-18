@@ -140,7 +140,7 @@ pub async fn run_pipeline(
 
     let cancel_flag = cancel.install();
     let config = config.unwrap_or_default();
-    let result = run_scan(root_path, provider, &config, Some(tx), Some(cancel_flag.clone()))
+    let mut result = run_scan(root_path, provider, &config, Some(tx), Some(cancel_flag.clone()))
         .await
         .map_err(|e| {
             cancel.clear();
@@ -151,10 +151,14 @@ pub async fn run_pipeline(
 
     let was_cancelled = cancel_flag.load(Ordering::SeqCst);
     cancel.clear();
-    let status = if was_cancelled { "cancelled" } else { "completed" };
+    result.status = if was_cancelled {
+        crate::scanner::orchestrate::ScanStatus::Cancelled
+    } else {
+        crate::scanner::orchestrate::ScanStatus::Completed
+    };
 
-    match store.save_scan(&result, status) {
-        Ok(scan_id) => info!(scan_id = %scan_id, status, "scan persisted"),
+    match store.save_scan(&result, result.status.as_str()) {
+        Ok(scan_id) => info!(scan_id = %scan_id, status = result.status.as_str(), "scan persisted"),
         Err(e) => warn!(error = %format!("{e:#}"), "failed to persist scan"),
     }
 
@@ -283,14 +287,21 @@ pub fn get_applied_for_root(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Find the most recent scan for `root` and return its scan_id.
+/// Find the most recent scan for `root` and return its scan_id. Backed by a
+/// targeted SQL query so it doesn't depend on `list_scan_groups`'s page size.
 fn latest_scan_id_for(store: &Store, root: &str) -> Result<String, String> {
-    let groups = store.list_scan_groups(50).map_err(|e| format!("{e:#}"))?;
-    groups
-        .into_iter()
-        .find(|g| g.root == root)
-        .map(|g| g.latest_scan_id)
+    store
+        .latest_scan_id_for_root(root)
+        .map_err(|e| format!("{e:#}"))?
         .ok_or_else(|| format!("no persisted scan found for {root}"))
+}
+
+/// IPC: find and load the most recent scan for `root`. Used by the report
+/// window so it can pull a fresh scan without paging through every group.
+#[tauri::command]
+pub fn get_latest_scan_for(store: State<'_, Store>, root: String) -> Result<ScanResult, String> {
+    let id = latest_scan_id_for(store.inner(), &root)?;
+    store.load_scan(&id).map_err(|e| format!("{e:#}"))
 }
 
 /// Render a markdown report for the latest persisted scan of `root`.
@@ -399,4 +410,33 @@ pub fn get_triage_for_root(
     store
         .get_triage_for_root(&root)
         .map_err(|e| format!("{e:#}"))
+}
+
+/// Open a URL in the user's default browser. Used by the markdown renderer
+/// so clicking an LLM-generated link doesn't navigate the Tauri webview.
+///
+/// Scheme is whitelisted (`http`, `https`, `mailto`) — anything else (file://,
+/// javascript:, custom protocols) is rejected here rather than relying on
+/// the OS to refuse. macOS-only for v0.1: shells out to `open(1)`.
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("empty url".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let allowed = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !allowed {
+        return Err(format!("scheme not allowed: {trimmed}"));
+    }
+    if trimmed.len() > 4096 {
+        return Err("url too long".into());
+    }
+    std::process::Command::new("open")
+        .arg(trimmed)
+        .spawn()
+        .map_err(|e| format!("open failed: {e}"))?;
+    Ok(())
 }

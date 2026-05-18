@@ -128,6 +128,19 @@ export interface StageUsage {
 	total: Usage;
 }
 
+/** Wall-clock milliseconds spent in each pipeline stage. `total_ms` is the
+ *  cumulative scan duration as of the most recent emission. */
+export interface StageDurations {
+	ingest_ms: number;
+	triage_ms: number;
+	detect_ms: number;
+	verify_ms: number;
+	patch_ms: number;
+	total_ms: number;
+}
+
+export type ScanStatus = 'completed' | 'cancelled';
+
 export const EMPTY_USAGE: Usage = {
 	input_tokens: 0,
 	output_tokens: 0,
@@ -141,6 +154,15 @@ export const EMPTY_STAGE_USAGE: StageUsage = {
 	verify: EMPTY_USAGE,
 	patch: EMPTY_USAGE,
 	total: EMPTY_USAGE
+};
+
+export const EMPTY_STAGE_DURATIONS: StageDurations = {
+	ingest_ms: 0,
+	triage_ms: 0,
+	detect_ms: 0,
+	verify_ms: 0,
+	patch_ms: 0,
+	total_ms: 0
 };
 
 export interface DetectError {
@@ -157,6 +179,8 @@ export interface ScanResult {
 	verified: VerifiedFinding[];
 	patches: Patch[];
 	usage: StageUsage;
+	durations: StageDurations;
+	status: ScanStatus;
 }
 
 export type ScanEvent =
@@ -168,7 +192,9 @@ export type ScanEvent =
 	| { kind: 'detect_complete'; total: number }
 	| { kind: 'verify_complete'; verified: VerifiedFinding[] }
 	| { kind: 'patch_complete'; patches: Patch[] }
-	| { kind: 'usage_update'; usage: StageUsage };
+	| { kind: 'usage_update'; usage: StageUsage }
+	| { kind: 'durations_update'; durations: StageDurations }
+	| { kind: 'rate_limited'; attempt: number; retry_after_secs: number };
 
 export async function greet(name: string): Promise<string> {
 	return invoke<string>('greet', { name });
@@ -327,12 +353,10 @@ export async function deleteScansForRoot(root: string): Promise<void> {
 	return invoke<void>('delete_scans_for_root', { root });
 }
 
-/** Convenience: find the most-recent scan for `root` and load it. */
+/** Convenience: load the latest persisted scan for `root`. Backed by a
+ *  dedicated IPC so it doesn't depend on `listScanGroups`'s page size. */
 export async function getLatestScanFor(root: string): Promise<ScanResult> {
-	const groups = await listScanGroups(50);
-	const match = groups.find((g) => g.root === root);
-	if (!match) throw new Error(`no persisted scan for ${root}`);
-	return loadScan(match.latest_scan_id);
+	return invoke<ScanResult>('get_latest_scan_for', { root });
 }
 
 // ---------- triage -------------------------------------------------------

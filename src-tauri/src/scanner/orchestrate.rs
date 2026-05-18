@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{info, instrument, warn};
 
-use crate::providers::counting::{diff, CancellingProvider, CountingProvider, UsageCounter};
+use crate::providers::counting::{diff, CancellingProvider, CountingProvider, RetryingProvider, UsageCounter};
 use crate::providers::{Provider, Usage};
 use crate::scanner::detect::{self, scan_with_tools};
 use crate::scanner::ingest::{self, Candidate, WalkResult};
@@ -69,6 +70,33 @@ pub enum ScanEvent {
     UsageUpdate {
         usage: StageUsage,
     },
+    /// Anthropic returned 429 and the provider is sleeping before retrying.
+    /// Emitted once per retry attempt so the UI can show "retrying in Xs"
+    /// instead of stalling silently.
+    RateLimited {
+        /// 1-indexed attempt number.
+        attempt: u32,
+        retry_after_secs: u64,
+    },
+    /// Per-stage wall-clock durations, updated after each stage boundary.
+    /// `total_ms` is the elapsed time since `run_scan` was entered.
+    DurationsUpdate {
+        durations: StageDurations,
+    },
+}
+
+/// Wall-clock time spent in each pipeline stage, plus the running total.
+/// Per-stage values are the elapsed time between that stage's start and
+/// completion. `total_ms` is the cumulative scan duration up to the most
+/// recent emission; once the scan finishes it equals end-to-end runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageDurations {
+    pub ingest_ms: u64,
+    pub triage_ms: u64,
+    pub detect_ms: u64,
+    pub verify_ms: u64,
+    pub patch_ms: u64,
+    pub total_ms: u64,
 }
 
 /// Token usage broken down by stage, plus the rolling total. Each per-stage
@@ -149,6 +177,31 @@ pub struct DetectError {
     pub error: String,
 }
 
+/// Final state of a scan, surfaced to the UI so it can render "Cancelled"
+/// vs. "Completed" without re-deriving it from the cancel flag (which can
+/// race late-arriving stage events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanStatus {
+    Completed,
+    Cancelled,
+}
+
+impl ScanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanStatus::Completed => "completed",
+            ScanStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl Default for ScanStatus {
+    fn default() -> Self {
+        ScanStatus::Completed
+    }
+}
+
 /// Everything the pipeline produced. Intermediate stages are retained so
 /// the UI can render the triage funnel, verify decisions, etc., without
 /// re-running anything.
@@ -163,6 +216,14 @@ pub struct ScanResult {
     pub verified: Vec<VerifiedFinding>,
     pub patches: Vec<Patch>,
     pub usage: StageUsage,
+    #[serde(default)]
+    pub durations: StageDurations,
+    /// Filled in by the command layer just before the result is returned to
+    /// the frontend. The orchestrator itself always leaves this as the
+    /// default ("completed") — it has no privileged view of whether the
+    /// cancel flag was ever flipped during the run.
+    #[serde(default)]
+    pub status: ScanStatus,
 }
 
 /// Run the full pipeline on a folder. Stages execute sequentially (so each
@@ -183,18 +244,40 @@ pub async fn run_scan(
     let events = events.as_ref();
     emit(events, ScanEvent::Started { root: root.clone() });
 
-    // Wrap the inbound provider so every `generate()` accrues into a shared
-    // counter. We snapshot the counter at each stage boundary to attribute
-    // tokens per stage. If a cancellation flag was supplied, also wrap so
-    // every API call short-circuits once it flips — stages still drain their
-    // already-spawned tasks, but new API round-trips fail fast.
+    // Layer decorators on the inbound provider. Order matters:
+    //   - Retry sits innermost so its sleeps don't get token-counted.
+    //   - Counting wraps it so all responses (post-retry) are tallied.
+    //   - Cancellation wraps everything so a cancel-flip short-circuits
+    //     before any retry decision.
+    // Each stage's `Usage` is computed by snapshotting the counter at stage
+    // boundaries and diffing. Already-running HTTP requests aren't aborted —
+    // cancel takes effect at the next round-trip.
     let counter = UsageCounter::new();
-    let mut provider: Arc<dyn Provider> = Arc::new(CountingProvider::new(provider, counter.clone()));
+    let retry_notify: crate::providers::counting::RetryNotify = {
+        let events_clone = events.cloned();
+        Arc::new(move |dur: std::time::Duration, attempt: u32| {
+            if let Some(tx) = &events_clone {
+                let _ = tx.send(ScanEvent::RateLimited {
+                    attempt,
+                    retry_after_secs: dur.as_secs(),
+                });
+            }
+        })
+    };
+    let mut retrying = RetryingProvider::new(provider).with_notify(retry_notify);
+    if let Some(flag) = cancel.clone() {
+        retrying = retrying.with_cancel(flag);
+    }
+    let mut provider: Arc<dyn Provider> = Arc::new(retrying);
+    provider = Arc::new(CountingProvider::new(provider, counter.clone()));
     if let Some(flag) = cancel.clone() {
         provider = Arc::new(CancellingProvider::new(provider, flag));
     }
     let mut stage_usage = StageUsage::default();
     let mut snapshot_before_stage = counter.snapshot();
+    let mut durations = StageDurations::default();
+    let scan_started = Instant::now();
+    let mut stage_started = scan_started;
 
     let is_cancelled = || cancel.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
     let trip_budget_if_over = |total: &Usage| {
@@ -228,6 +311,15 @@ pub async fn run_scan(
             walk: ingest.clone(),
         },
     );
+    durations.ingest_ms = stage_started.elapsed().as_millis() as u64;
+    durations.total_ms = scan_started.elapsed().as_millis() as u64;
+    emit(
+        events,
+        ScanEvent::DurationsUpdate {
+            durations: durations.clone(),
+        },
+    );
+    stage_started = Instant::now();
 
     if ingest.candidates.is_empty() || is_cancelled() {
         return Ok(ScanResult {
@@ -239,6 +331,8 @@ pub async fn run_scan(
             verified: Vec::new(),
             patches: Vec::new(),
             usage: stage_usage,
+            durations,
+            status: ScanStatus::default(),
         });
     }
 
@@ -277,6 +371,15 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        durations.triage_ms = stage_started.elapsed().as_millis() as u64;
+        durations.total_ms = scan_started.elapsed().as_millis() as u64;
+        emit(
+            events,
+            ScanEvent::DurationsUpdate {
+                durations: durations.clone(),
+            },
+        );
+        stage_started = Instant::now();
         trip_budget_if_over(&stage_usage.total);
     }
 
@@ -291,6 +394,8 @@ pub async fn run_scan(
             verified: Vec::new(),
             patches: Vec::new(),
             usage: stage_usage,
+            durations,
+            status: ScanStatus::default(),
         });
     }
 
@@ -383,6 +488,15 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        durations.detect_ms = stage_started.elapsed().as_millis() as u64;
+        durations.total_ms = scan_started.elapsed().as_millis() as u64;
+        emit(
+            events,
+            ScanEvent::DurationsUpdate {
+                durations: durations.clone(),
+            },
+        );
+        stage_started = Instant::now();
         trip_budget_if_over(&stage_usage.total);
     }
 
@@ -425,6 +539,15 @@ pub async fn run_scan(
         stage_usage.verify = diff(&after, &snapshot_before_stage);
         stage_usage.total = after.clone();
         snapshot_before_stage = after;
+        durations.verify_ms = stage_started.elapsed().as_millis() as u64;
+        durations.total_ms = scan_started.elapsed().as_millis() as u64;
+        stage_started = Instant::now();
+        emit(
+            events,
+            ScanEvent::DurationsUpdate {
+                durations: durations.clone(),
+            },
+        );
         emit(
             events,
             ScanEvent::UsageUpdate {
@@ -467,6 +590,14 @@ pub async fn run_scan(
                 usage: stage_usage.clone(),
             },
         );
+        durations.patch_ms = stage_started.elapsed().as_millis() as u64;
+        durations.total_ms = scan_started.elapsed().as_millis() as u64;
+        emit(
+            events,
+            ScanEvent::DurationsUpdate {
+                durations: durations.clone(),
+            },
+        );
         trip_budget_if_over(&stage_usage.total);
     }
 
@@ -479,6 +610,8 @@ pub async fn run_scan(
         verified,
         patches,
         usage: stage_usage,
+        durations,
+        status: ScanStatus::default(),
     })
 }
 

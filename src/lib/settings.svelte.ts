@@ -54,11 +54,60 @@ function save(s: ScanSettings) {
 	}
 }
 
+/** Concurrency bounds — must match the limits shown in the Settings UI. */
+const CONCURRENCY_BOUNDS: Record<
+	'triage_concurrency' | 'detect_concurrency' | 'verify_concurrency' | 'patch_concurrency',
+	{ min: number; max: number }
+> = {
+	triage_concurrency: { min: 1, max: 32 },
+	detect_concurrency: { min: 1, max: 16 },
+	verify_concurrency: { min: 1, max: 8 },
+	patch_concurrency: { min: 1, max: 8 }
+};
+
+function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
+	const n = typeof v === 'number' ? v : Number(v);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(Math.max(Math.trunc(n), lo), hi);
+}
+
+/** Clamp every numeric field against its bounds. Strings stay untouched. */
+function sanitize(s: ScanSettings): ScanSettings {
+	return {
+		...s,
+		triage_concurrency: clampInt(
+			s.triage_concurrency,
+			CONCURRENCY_BOUNDS.triage_concurrency.min,
+			CONCURRENCY_BOUNDS.triage_concurrency.max,
+			DEFAULT_SETTINGS.triage_concurrency
+		),
+		detect_concurrency: clampInt(
+			s.detect_concurrency,
+			CONCURRENCY_BOUNDS.detect_concurrency.min,
+			CONCURRENCY_BOUNDS.detect_concurrency.max,
+			DEFAULT_SETTINGS.detect_concurrency
+		),
+		verify_concurrency: clampInt(
+			s.verify_concurrency,
+			CONCURRENCY_BOUNDS.verify_concurrency.min,
+			CONCURRENCY_BOUNDS.verify_concurrency.max,
+			DEFAULT_SETTINGS.verify_concurrency
+		),
+		patch_concurrency: clampInt(
+			s.patch_concurrency,
+			CONCURRENCY_BOUNDS.patch_concurrency.min,
+			CONCURRENCY_BOUNDS.patch_concurrency.max,
+			DEFAULT_SETTINGS.patch_concurrency
+		),
+		budget_total_tokens: clampInt(s.budget_total_tokens, 0, Number.MAX_SAFE_INTEGER, 0)
+	};
+}
+
 class SettingsStore {
 	value: ScanSettings = $state(load());
 
 	update(partial: Partial<ScanSettings>) {
-		this.value = { ...this.value, ...partial };
+		this.value = sanitize({ ...this.value, ...partial });
 		save(this.value);
 	}
 

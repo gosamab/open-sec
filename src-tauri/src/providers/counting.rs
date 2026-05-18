@@ -1,17 +1,19 @@
-//! A `Provider` wrapper that tallies `Usage` across every `generate()` call.
+//! `Provider` decorators: token counting, cancellation, and rate-limit retry.
 //!
-//! Used by the orchestrator to attribute token spend per pipeline stage: a
-//! single counter is shared by the wrapper, the orchestrator snapshots the
-//! counter before each stage and subtracts to get the stage's contribution.
+//! Despite the filename this module hosts every decorator we layer on top of
+//! the inner Anthropic client. Each has the same shape: wrap `Arc<dyn Provider>`
+//! and forward `generate` / `stream` with a small slice of extra behaviour.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use tracing::{info, warn};
 
 use super::{GenerationRequest, Provider, Response, StreamEvent, Usage};
-use crate::error::ProviderResult;
+use crate::error::{ProviderError, ProviderResult};
 
 /// Atomic-ish usage accumulator. The single `Mutex` is fine — generate
 /// calls take seconds, so contention is negligible compared to the call
@@ -130,5 +132,141 @@ impl Provider for CancellingProvider {
             return Err(crate::error::ProviderError::Cancelled);
         }
         self.inner.stream(req).await
+    }
+}
+
+/// Notification fired when the retry wrapper is about to sleep, so the
+/// orchestrator can surface "rate-limited, retrying in Xs" through the UI
+/// event stream. `attempt` is 1-indexed (first retry = 1).
+pub type RetryNotify = Arc<dyn Fn(Duration, u32) + Send + Sync>;
+
+/// Auto-retry on `ProviderError::RateLimited`. Sleeps for `retry_after` (or
+/// `default_backoff` when the API didn't give us one), capped at `max_sleep`,
+/// up to `max_attempts` times. Cancellation is honored both at the call
+/// boundary and during the sleep itself (we poll every 250ms instead of
+/// `tokio::time::sleep` so a cancel-flip wakes us up promptly).
+///
+/// Only the initial connection error is retried for `stream()` — once a
+/// stream is mid-flight there's no resume point on Anthropic's side.
+pub struct RetryingProvider {
+    inner: Arc<dyn Provider>,
+    cancel: Option<Arc<AtomicBool>>,
+    notify: Option<RetryNotify>,
+    max_attempts: u32,
+    default_backoff: Duration,
+    max_sleep: Duration,
+}
+
+impl RetryingProvider {
+    pub fn new(inner: Arc<dyn Provider>) -> Self {
+        Self {
+            inner,
+            cancel: None,
+            notify: None,
+            max_attempts: 5,
+            default_backoff: Duration::from_secs(10),
+            max_sleep: Duration::from_secs(60),
+        }
+    }
+
+    pub fn with_cancel(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
+    }
+
+    pub fn with_notify(mut self, notify: RetryNotify) -> Self {
+        self.notify = Some(notify);
+        self
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
+    /// Cancellable sleep. Polls the cancel flag every 250ms so the user
+    /// doesn't have to wait the full retry-after for cancel to take effect.
+    async fn sleep_or_cancel(&self, dur: Duration) -> ProviderResult<()> {
+        let tick = Duration::from_millis(250);
+        let mut remaining = dur;
+        while !remaining.is_zero() {
+            if self.is_cancelled() {
+                return Err(ProviderError::Cancelled);
+            }
+            let chunk = remaining.min(tick);
+            tokio::time::sleep(chunk).await;
+            remaining = remaining.saturating_sub(chunk);
+        }
+        Ok(())
+    }
+
+    fn sleep_for(&self, retry_after: Option<Duration>) -> Duration {
+        retry_after.unwrap_or(self.default_backoff).min(self.max_sleep)
+    }
+}
+
+#[async_trait]
+impl Provider for RetryingProvider {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response> {
+        for attempt in 0..self.max_attempts {
+            match self.inner.generate(req.clone()).await {
+                Err(ProviderError::RateLimited { retry_after }) => {
+                    if attempt + 1 >= self.max_attempts {
+                        warn!(attempt = attempt + 1, "rate-limited and out of retries");
+                        return Err(ProviderError::RateLimited { retry_after });
+                    }
+                    let sleep = self.sleep_for(retry_after);
+                    info!(
+                        attempt = attempt + 1,
+                        sleep_secs = sleep.as_secs(),
+                        "rate-limited; sleeping and retrying"
+                    );
+                    if let Some(notify) = &self.notify {
+                        notify(sleep, attempt + 1);
+                    }
+                    self.sleep_or_cancel(sleep).await?;
+                    continue;
+                }
+                other => return other,
+            }
+        }
+        // Loop above always either returns or continues; this is unreachable
+        // unless max_attempts == 0 (which we don't allow), but the borrow
+        // checker doesn't know that.
+        Err(ProviderError::RateLimited { retry_after: None })
+    }
+
+    async fn stream(
+        &self,
+        req: GenerationRequest,
+    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
+        for attempt in 0..self.max_attempts {
+            match self.inner.stream(req.clone()).await {
+                Err(ProviderError::RateLimited { retry_after }) => {
+                    if attempt + 1 >= self.max_attempts {
+                        warn!(attempt = attempt + 1, "stream rate-limited and out of retries");
+                        return Err(ProviderError::RateLimited { retry_after });
+                    }
+                    let sleep = self.sleep_for(retry_after);
+                    info!(
+                        attempt = attempt + 1,
+                        sleep_secs = sleep.as_secs(),
+                        "stream rate-limited; sleeping and retrying"
+                    );
+                    if let Some(notify) = &self.notify {
+                        notify(sleep, attempt + 1);
+                    }
+                    self.sleep_or_cancel(sleep).await?;
+                    continue;
+                }
+                other => return other,
+            }
+        }
+        Err(ProviderError::RateLimited { retry_after: None })
     }
 }

@@ -292,6 +292,8 @@ mod tests {
             }],
             patches: Vec::new(),
             usage: StageUsage::default(),
+            durations: Default::default(),
+            status: Default::default(),
         }
     }
 

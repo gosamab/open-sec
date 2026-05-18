@@ -20,25 +20,73 @@
 		draft = { ...DEFAULT_SETTINGS };
 	}
 
-	function backdropKey(e: KeyboardEvent) {
-		if (e.key === 'Escape') onClose();
+	// Container we use both as the focus-trap root and for "outside click" hit-testing.
+	let dialog = $state<HTMLDivElement | null>(null);
+	// Element that had focus before we opened, so we can restore on close.
+	const opener = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+
+	$effect(() => {
+		if (!dialog) return;
+		// Focus the first interactive element on mount so keyboard users land
+		// inside the dialog without a stray Tab press.
+		const first = dialog.querySelector<HTMLElement>(
+			'input, button, [tabindex]:not([tabindex="-1"])'
+		);
+		first?.focus();
+		return () => {
+			// Return focus to whoever opened us. If they're gone (rare), the
+			// browser falls back to <body>.
+			opener?.focus?.();
+		};
+	});
+
+	function onWindowKey(e: KeyboardEvent) {
+		if (e.key === 'Escape') {
+			e.preventDefault();
+			onClose();
+			return;
+		}
+		if (e.key !== 'Tab' || !dialog) return;
+		// Roll our own focus trap: collect the focusable descendants and wrap
+		// at both ends. Keeps the user from tabbing out into the workspace
+		// behind the modal.
+		const focusables = Array.from(
+			dialog.querySelectorAll<HTMLElement>(
+				'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+			)
+		).filter((el) => !el.hasAttribute('aria-hidden') && el.offsetParent !== null);
+		if (focusables.length === 0) return;
+		const first = focusables[0];
+		const last = focusables[focusables.length - 1];
+		const active = document.activeElement as HTMLElement | null;
+		if (e.shiftKey && active === first) {
+			e.preventDefault();
+			last.focus();
+		} else if (!e.shiftKey && active === last) {
+			e.preventDefault();
+			first.focus();
+		}
 	}
 </script>
 
-<svelte:window onkeydown={backdropKey} />
+<svelte:window onkeydown={onWindowKey} />
 
-<div
-	class="bg-background/80 fixed inset-0 z-50 flex items-center justify-center p-6 backdrop-blur-sm"
-	role="dialog"
-	aria-modal="true"
-	aria-label="Settings"
-	onclick={(e) => {
-		if (e.target === e.currentTarget) onClose();
-	}}
-	onkeydown={() => {}}
-	tabindex="-1"
->
-	<div class="bg-background border-border w-full max-w-2xl space-y-6 rounded-lg border p-6 shadow-xl">
+<div class="fixed inset-0 z-50 flex items-center justify-center p-6">
+	<!-- Backdrop: a real button so click-to-close is keyboard-accessible too. -->
+	<button
+		type="button"
+		class="bg-background/80 absolute inset-0 backdrop-blur-sm"
+		aria-label="Close settings"
+		tabindex="-1"
+		onclick={onClose}
+	></button>
+	<div
+		bind:this={dialog}
+		class="bg-background border-border relative w-full max-w-2xl space-y-6 rounded-lg border p-6 shadow-xl"
+		role="dialog"
+		aria-modal="true"
+		aria-label="Settings"
+	>
 		<header class="space-y-1">
 			<h2 class="text-lg font-semibold tracking-tight">Settings</h2>
 			<p class="text-muted-foreground text-xs">

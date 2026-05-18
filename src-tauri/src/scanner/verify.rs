@@ -207,16 +207,26 @@ pub async fn verify_one(
     })
 }
 
+/// Fires once per verifier task as it finishes (success, hardening
+/// pass-through, or error). The caller owns the "done out of total" math —
+/// this exists purely so the orchestrator can stream progress events to the
+/// UI without breaking the *_many abstraction.
+pub type ProgressTick = Arc<dyn Fn() + Send + Sync>;
+
 /// Verify many findings in parallel. Caps concurrency at `concurrency` (use
 /// `DEFAULT_VERIFY_CONCURRENCY` for the CLAUDE.md default). Hardening
 /// findings skip the LLM and pass through with `verdict: None`. Failures on
 /// individual findings are logged and surface as `verdict: None`.
+///
+/// `on_item` is invoked once per completed finding (regardless of
+/// success/failure/hardening). Pass `None` to opt out — the test suite does.
 pub async fn verify_many(
     findings: Vec<Finding>,
     scan_root: PathBuf,
     provider: Arc<dyn Provider>,
     model: &str,
     concurrency: usize,
+    on_item: Option<ProgressTick>,
 ) -> Vec<VerifiedFinding> {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let model = model.to_string();
@@ -261,6 +271,9 @@ pub async fn verify_many(
     while let Some(joined) = set.join_next().await {
         if let Ok(v) = joined {
             out.push(v);
+            if let Some(tick) = &on_item {
+                tick();
+            }
         }
     }
     // Stable order: by file then line_start.
@@ -425,7 +438,7 @@ mod tests {
             mk_finding("focus.ts", FindingKind::Vuln),
             mk_finding("focus.ts", FindingKind::Hardening),
         ];
-        let out = verify_many(findings, root.clone(), provider, "scripted", 2).await;
+        let out = verify_many(findings, root.clone(), provider, "scripted", 2, None).await;
         assert_eq!(out.len(), 3);
         assert_eq!(out.iter().filter(|v| v.verdict.is_some()).count(), 1);
         assert_eq!(out.iter().filter(|v| v.verdict.is_none()).count(), 2);

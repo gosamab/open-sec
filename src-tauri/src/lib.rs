@@ -81,6 +81,7 @@ pub fn run() {
             commands::clear_triage,
             commands::get_triage_for_root,
             commands::open_url,
+            commands::open_in_editor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

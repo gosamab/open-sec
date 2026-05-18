@@ -77,7 +77,7 @@ pub(super) struct StoredFinding {
     pub patch_json: Option<String>,
 }
 
-pub(super) fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -86,7 +86,7 @@ pub(super) fn now_ms() -> i64 {
 }
 
 /// 24-hex-char id with a millis prefix so SQL ORDER BY id ≈ chronological.
-pub(super) fn new_scan_id() -> String {
+pub fn new_scan_id() -> String {
     let mut hasher = Sha256::new();
     let ts = now_ms();
     hasher.update(ts.to_le_bytes());

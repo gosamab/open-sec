@@ -92,12 +92,14 @@
 				case 'triage_complete':
 					scan.triaged = ev.triaged;
 					const keepers = ev.triaged.filter((t) => t.result.priority !== 'skip').length;
-					scan.stage = `detecting on ${keepers} file(s)…`;
+					scan.stage = keepers > 0 ? `detecting 0/${keepers} file(s)…` : 'detecting…';
 					break;
 				case 'detect_file_complete': {
 					const next = new Map(scan.findingsByFile);
 					next.set(ev.rel_path, ev.findings);
 					scan.findingsByFile = next;
+					const total = scan.triaged.filter((t) => t.result.priority !== 'skip').length;
+					if (total > 0) scan.stage = `detecting ${next.size}/${total} file(s)…`;
 					break;
 				}
 				case 'detect_file_errored': {
@@ -107,10 +109,15 @@
 					const e = new Map(scan.detectErrors);
 					e.set(ev.rel_path, ev.error);
 					scan.detectErrors = e;
+					const total = scan.triaged.filter((t) => t.result.priority !== 'skip').length;
+					if (total > 0) scan.stage = `detecting ${f.size}/${total} file(s)…`;
 					break;
 				}
 				case 'detect_complete':
-					scan.stage = `verifying ${ev.total} finding(s)…`;
+					scan.stage = ev.total > 0 ? `verifying 0/${ev.total} finding(s)…` : 'verifying…';
+					break;
+				case 'verify_progress':
+					if (ev.total > 0) scan.stage = `verifying ${ev.done}/${ev.total} finding(s)…`;
 					break;
 				case 'verify_complete': {
 					const next = new Map(scan.verdictById);
@@ -119,6 +126,9 @@
 					scan.stage = 'proposing patches…';
 					break;
 				}
+				case 'patch_progress':
+					if (ev.total > 0) scan.stage = `patching ${ev.done}/${ev.total} finding(s)…`;
+					break;
 				case 'patch_complete': {
 					const next = new Map(scan.patchById);
 					for (const p of ev.patches) next.set(p.finding_id, p);
@@ -236,6 +246,7 @@
 		if (!scan.root || scan.scanning) return;
 		scan.scanning = true;
 		scan.cancelling = false;
+		scan.scanStartedAt = Date.now();
 		scan.error = null;
 		scan.stage = 'starting…';
 		scan.resetResults();
@@ -254,6 +265,7 @@
 		} finally {
 			scan.scanning = false;
 			scan.cancelling = false;
+			scan.scanStartedAt = null;
 		}
 	}
 
@@ -284,8 +296,10 @@
 
 	async function requestCancel() {
 		if (!scan.scanning || scan.cancelling) return;
+		// Leave scan.stage alone — the progress bar should keep reflecting the
+		// real pipeline state. The cancel-in-flight cue is the "Cancelling…"
+		// label on the cancel button (WorkspaceTopBar reads scan.cancelling).
 		scan.cancelling = true;
-		scan.stage = 'cancelling…';
 		try {
 			await cancelScan();
 		} catch (e) {
@@ -379,7 +393,11 @@
 		scan.rateLimitNotice = null;
 		scan.scanResult = r;
 		scan.resultRoot = r.root;
-		scan.stage = r.status === 'cancelled' ? 'cancelled' : 'done';
+		// A `running` row in the DB means the previous launch crashed or
+		// was killed mid-scan. Surface it like a cancellation — the user
+		// can re-scan; the partial findings are what we managed to persist
+		// before the interruption.
+		scan.stage = r.status === 'cancelled' || r.status === 'running' ? 'cancelled' : 'done';
 	}
 
 	function backToLauncher() {
@@ -710,10 +728,15 @@
 			.then((ex) => {
 				if (cancelled) return;
 				excerpt = ex;
-				return highlightCode(ex.text, ex.language);
-			})
-			.then((html) => {
-				if (!cancelled && html !== undefined) excerptHtml = html;
+				highlightCode(ex.text, ex.language)
+					.then((html) => {
+						if (!cancelled) excerptHtml = html;
+					})
+					.catch((e) => {
+						// Highlighting failed but the plain-text excerpt still renders.
+						console.warn('shiki: highlight failed, falling back to plain text', e);
+						if (!cancelled) excerptHtml = null;
+					});
 			})
 			.catch((e) => {
 				if (cancelled) return;

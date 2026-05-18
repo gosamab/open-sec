@@ -4,8 +4,15 @@
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import ApiKeyPrompt from '$lib/components/ApiKeyPrompt.svelte';
 	import logo from '$lib/assets/logo.png';
-	import { deleteScansForRoot, hasAnthropicKey, listScanGroups, type ScanGroup } from '$lib/ipc';
-	import { onMount } from 'svelte';
+	import {
+		deleteScansForRoot,
+		hasAnthropicKey,
+		listenScanEvents,
+		listScanGroups,
+		type ScanGroup
+	} from '$lib/ipc';
+	import type { UnlistenFn } from '@tauri-apps/api/event';
+	import { onDestroy, onMount } from 'svelte';
 
 	interface Props {
 		onOpenFresh: (path: string) => void;
@@ -18,9 +25,24 @@
 	let groups = $state<ScanGroup[]>([]);
 	let loadingGroups = $state(true);
 
+	let unlisten: UnlistenFn | null = null;
+
 	onMount(async () => {
 		keyConfigured = await hasAnthropicKey();
 		await reloadGroups();
+		// A scan started from this Launcher session keeps running in the
+		// background after the user goes back here — `run_pipeline` only
+		// `save_scan`s once it returns, so recents won't reflect the new row
+		// until then. Subscribe to the event stream so we can refresh
+		// whenever a scan terminates. We also catch errors so a flaky scan
+		// doesn't leave the Launcher stale.
+		unlisten = await listenScanEvents((ev) => {
+			if (ev.kind === 'patch_complete') void reloadGroups();
+		});
+	});
+
+	onDestroy(() => {
+		unlisten?.();
 	});
 
 	async function reloadGroups() {

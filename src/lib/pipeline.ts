@@ -25,7 +25,7 @@ export function stageIndex(stage: string): number {
 	if (stage.startsWith('triaging')) return 1;
 	if (stage.startsWith('detecting')) return 2;
 	if (stage.startsWith('verifying')) return 3;
-	if (stage.startsWith('proposing')) return 4;
+	if (stage.startsWith('proposing') || stage.startsWith('patching')) return 4;
 	if (stage === 'done' || stage === 'cancelled') return PIPELINE_STAGES.length;
 	return -1;
 }

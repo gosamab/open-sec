@@ -1,10 +1,11 @@
 <script lang="ts">
+	import { ExternalLink } from 'lucide-svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import FindingBadges from '$lib/components/FindingBadges.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { renderInlineMd, renderMd } from '$lib/markdown';
-	import type { Excerpt, Finding, Patch, TriageRecord, TriageStatus, Verdict } from '$lib/ipc';
+	import { openInEditor, type Excerpt, type Finding, type Patch, type TriageRecord, type TriageStatus, type Verdict } from '$lib/ipc';
 	import { referencesFor } from '$lib/references';
 	import {
 		diffLineClass,
@@ -81,6 +82,14 @@
 
 	let dataFlowSteps = $derived(parseDataFlow(finding.data_flow));
 	let refs = $derived(referencesFor(finding));
+
+	async function openExcerptInEditor() {
+		try {
+			await openInEditor(finding.file, finding.line_start);
+		} catch (e) {
+			console.error('open_in_editor failed', e);
+		}
+	}
 </script>
 
 <article class="divide-y divide-border">
@@ -233,9 +242,20 @@
 				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					{excerpt.source === 'enclosing_function' ? 'Enclosing function' : 'Excerpt'}
 				</h3>
-				<span class="font-mono text-[0.625rem] text-muted-foreground">
-					L{excerpt.start_line}-{excerpt.end_line}
-				</span>
+				<div class="flex items-center gap-2">
+					<span class="font-mono text-[0.625rem] text-muted-foreground">
+						L{excerpt.start_line}-{excerpt.end_line}
+					</span>
+					<button
+						type="button"
+						class="inline-flex h-6 items-center gap-1 rounded px-2 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+						title="Open in VS Code (or any vscode:// handler — Cursor, VSCodium)"
+						onclick={openExcerptInEditor}
+					>
+						<ExternalLink size={10} strokeWidth={2.5} />
+						<span>Open</span>
+					</button>
+				</div>
 			</div>
 			{#if excerptHtml}
 				<div class="shiki-wrap">{@html excerptHtml}</div>

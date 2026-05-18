@@ -33,7 +33,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use types::{AppliedPatchRecord, ScanGroup, TriageRecord, TriageStatus};
+pub use types::{
+    new_scan_id, now_ms, AppliedPatchRecord, ScanGroup, TriageRecord, TriageStatus,
+};
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -48,7 +50,9 @@ impl Store {
     }
 
     /// Open (or create) the SQLite database at `path` and run any pending
-    /// schema migrations.
+    /// schema migrations. Any scan rows still in `running` from a previous
+    /// crash / kill are flipped to `cancelled` so the recents list doesn't
+    /// keep displaying them as in-progress forever.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -61,7 +65,21 @@ impl Store {
             conn: Mutex::new(conn),
         };
         store.migrate()?;
+        store.finalize_stale_running_scans()?;
         Ok(store)
+    }
+
+    /// Flip any leftover `running` rows to `cancelled`. Runs once per
+    /// `open()` — by the time we reach this code, no scan can possibly be
+    /// running yet, so anything still tagged `running` is from a previous
+    /// process that exited without finalizing.
+    fn finalize_stale_running_scans(&self) -> Result<()> {
+        let conn = self.db();
+        conn.execute(
+            "UPDATE scans SET status = 'cancelled' WHERE status = 'running'",
+            [],
+        )?;
+        Ok(())
     }
 
     /// In-memory store, for tests.

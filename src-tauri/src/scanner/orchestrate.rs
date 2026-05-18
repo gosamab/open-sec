@@ -6,7 +6,7 @@
 //! token budget cap trips that same flag at stage boundaries.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,8 +56,21 @@ pub enum ScanEvent {
     DetectComplete {
         total: usize,
     },
+    /// One verifier task finished (success, hardening pass-through, or error).
+    /// Emitted from inside `verify_many` so the UI can show `verifying M/N`
+    /// progress like detect does, instead of freezing at the start label
+    /// until the whole stage finishes.
+    VerifyProgress {
+        done: usize,
+        total: usize,
+    },
     VerifyComplete {
         verified: Vec<VerifiedFinding>,
+    },
+    /// One patch task finished. Same rationale as `VerifyProgress`.
+    PatchProgress {
+        done: usize,
+        total: usize,
     },
     PatchComplete {
         patches: Vec<Patch>,
@@ -232,12 +245,16 @@ pub struct DetectError {
     pub error: String,
 }
 
-/// Final state of a scan, surfaced to the UI so it can render "Cancelled"
-/// vs. "Completed" without re-deriving it from the cancel flag (which can
-/// race late-arriving stage events).
+/// Final state of a scan, surfaced to the UI so it can render the
+/// difference without re-deriving it from the cancel flag (which can race
+/// late-arriving stage events). `Running` is the in-flight state — the
+/// pipeline writes partial rows with this status as it goes, so a crash or
+/// abrupt close leaves a recognisable "interrupted" record instead of
+/// silently dropping every dollar spent up to that point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScanStatus {
+    Running,
     Completed,
     Cancelled,
 }
@@ -245,6 +262,7 @@ pub enum ScanStatus {
 impl ScanStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            ScanStatus::Running => "running",
             ScanStatus::Completed => "completed",
             ScanStatus::Cancelled => "cancelled",
         }
@@ -536,12 +554,24 @@ pub async fn run_scan(
         }
         Vec::new()
     } else {
+        let total = all_findings.len();
+        emit(&events, ScanEvent::VerifyProgress { done: 0, total });
+        let progress = {
+            let events = events.clone();
+            let done = Arc::new(AtomicUsize::new(0));
+            let tick: verify::ProgressTick = Arc::new(move || {
+                let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = events.send(ScanEvent::VerifyProgress { done: d, total });
+            });
+            Some(tick)
+        };
         verify_many(
             all_findings,
             root.clone(),
             provider.clone(),
             &config.verify_model,
             config.verify_concurrency,
+            progress,
         )
         .await
     };
@@ -582,12 +612,24 @@ pub async fn run_scan(
         }
         Vec::new()
     } else {
+        let total = kept_or_hardening;
+        emit(&events, ScanEvent::PatchProgress { done: 0, total });
+        let progress = {
+            let events = events.clone();
+            let done = Arc::new(AtomicUsize::new(0));
+            let tick: verify::ProgressTick = Arc::new(move || {
+                let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = events.send(ScanEvent::PatchProgress { done: d, total });
+            });
+            Some(tick)
+        };
         propose_many(
             verified.clone(),
             root.clone(),
             provider,
             &config.patch_model,
             config.patch_concurrency,
+            progress,
         )
         .await
     };

@@ -163,6 +163,8 @@
 			stage={scan.stage}
 			rateLimitNotice={scan.rateLimitNotice}
 			durations={scan.durations}
+			scanning={scan.scanning}
+			scanStartedAt={scan.scanStartedAt}
 		/>
 	{/if}
 

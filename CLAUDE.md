@@ -31,9 +31,11 @@ CancellingProvider → CountingProvider → RetryingProvider → AnthropicProvid
 - **Retry innermost** so its sleeps aren't token-counted.
 - **Counting** sees post-retry responses only.
 - **Cancellation outermost** short-circuits before any retry decision via a
-  shared `AtomicBool`. Already-running HTTP requests aren't aborted; cancel
-  takes effect at the *next* round-trip. Budget cap (`budget_total_tokens`)
-  uses the same flag — orchestrator flips it at a stage boundary.
+  shared `AtomicBool`. It also races the in-flight inner call against a
+  100 ms cancel-flag poll — when the flag trips mid-request, the pinned
+  inner future is dropped, which aborts the underlying reqwest call.
+  Budget cap (`budget_total_tokens`) uses the same flag — orchestrator
+  flips it at a stage boundary.
 
 This decorator stack is why no `*_many` signature threads a cancel token.
 

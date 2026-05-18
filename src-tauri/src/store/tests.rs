@@ -54,7 +54,8 @@ fn mk_result() -> ScanResult {
 fn round_trip_save_load() {
     let store = Store::open_in_memory().unwrap();
     let result = mk_result();
-    let scan_id = store.save_scan(&result, "completed").unwrap();
+    let scan_id = new_scan_id();
+    store.save_scan(&scan_id, now_ms(), &result, "completed").unwrap();
     let loaded = store.load_scan(&scan_id).unwrap();
     assert_eq!(loaded.verified.len(), 1);
     assert_eq!(loaded.verified[0].finding.title, "Test a");
@@ -68,13 +69,68 @@ fn round_trip_save_load() {
 fn list_scan_groups_returns_latest_per_root() {
     let store = Store::open_in_memory().unwrap();
     let result = mk_result();
-    let _id1 = store.save_scan(&result, "completed").unwrap();
+    let id1 = new_scan_id();
+    store.save_scan(&id1, now_ms(), &result, "completed").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let id2 = store.save_scan(&result, "completed").unwrap();
+    let id2 = new_scan_id();
+    store.save_scan(&id2, now_ms(), &result, "completed").unwrap();
 
     let groups = store.list_scan_groups(20).unwrap();
     assert_eq!(groups.len(), 1, "same root must collapse to one group");
     assert_eq!(groups[0].latest_scan_id, id2);
+}
+
+#[test]
+fn save_scan_upserts_so_incremental_writes_dont_duplicate() {
+    let store = Store::open_in_memory().unwrap();
+    let scan_id = new_scan_id();
+    let started_at = now_ms();
+
+    // First save: detect-only state (one file, one finding, no verdict).
+    let mut partial = mk_result();
+    partial.verified.clear();
+    partial.findings_by_file[0].findings[0].title = "first pass".into();
+    store
+        .save_scan(&scan_id, started_at, &partial, "running")
+        .unwrap();
+
+    // Second save: same scan_id, now with verdict — should overwrite, not
+    // insert a sibling row or duplicate findings.
+    let final_result = mk_result();
+    store
+        .save_scan(&scan_id, started_at, &final_result, "completed")
+        .unwrap();
+
+    let loaded = store.load_scan(&scan_id).unwrap();
+    assert_eq!(loaded.findings_by_file.len(), 1);
+    assert_eq!(loaded.findings_by_file[0].findings.len(), 1);
+    assert_eq!(loaded.findings_by_file[0].findings[0].title, "Test a");
+    assert!(loaded.verified[0].verdict.as_ref().unwrap().is_reachable);
+    assert!(matches!(
+        loaded.status,
+        crate::scanner::orchestrate::ScanStatus::Completed
+    ));
+}
+
+#[test]
+fn save_scan_persists_findings_before_verify_runs() {
+    let store = Store::open_in_memory().unwrap();
+    let scan_id = new_scan_id();
+    let mut detect_only = mk_result();
+    detect_only.verified.clear(); // verify hasn't run yet
+    detect_only.patches.clear();
+    store
+        .save_scan(&scan_id, now_ms(), &detect_only, "running")
+        .unwrap();
+
+    let loaded = store.load_scan(&scan_id).unwrap();
+    assert_eq!(loaded.findings_by_file.len(), 1);
+    assert_eq!(loaded.findings_by_file[0].findings.len(), 1);
+    assert!(loaded.verified[0].verdict.is_none());
+    assert!(matches!(
+        loaded.status,
+        crate::scanner::orchestrate::ScanStatus::Running
+    ));
 }
 
 #[test]

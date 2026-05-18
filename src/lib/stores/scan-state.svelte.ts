@@ -27,6 +27,10 @@ class ScanState {
 	stage = $state<string>('idle');
 	error = $state<string | null>(null);
 	rateLimitNotice = $state<{ attempt: number; retry_after_secs: number } | null>(null);
+	/** `Date.now()` snapshot taken when a scan starts. Drives the realtime
+	 *  total-duration counter in the progress bar; cleared back to `null`
+	 *  when the scan ends so we fall back to the orchestrator-reported value. */
+	scanStartedAt = $state<number | null>(null);
 
 	// Per-stage outputs (populated by scan:event stream)
 	walk = $state<ScanResult['ingest'] | null>(null);

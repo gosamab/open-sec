@@ -133,7 +133,7 @@ export interface StageDurations {
 	total_ms: number;
 }
 
-export type ScanStatus = 'completed' | 'cancelled';
+export type ScanStatus = 'running' | 'completed' | 'cancelled';
 
 export const EMPTY_USAGE: Usage = {
 	input_tokens: 0,
@@ -184,7 +184,9 @@ export type ScanEvent =
 	| { kind: 'detect_file_complete'; rel_path: string; findings: Finding[] }
 	| { kind: 'detect_file_errored'; rel_path: string; error: string }
 	| { kind: 'detect_complete'; total: number }
+	| { kind: 'verify_progress'; done: number; total: number }
 	| { kind: 'verify_complete'; verified: VerifiedFinding[] }
+	| { kind: 'patch_progress'; done: number; total: number }
 	| { kind: 'patch_complete'; patches: Patch[] }
 	| { kind: 'usage_update'; usage: StageUsage }
 	| { kind: 'durations_update'; durations: StageDurations }
@@ -369,4 +371,10 @@ export async function getTriageForRoot(root: string): Promise<TriageRecord[]> {
 /** Open a URL in the OS default browser. Backend whitelists http/https/mailto. */
 export async function openUrl(url: string): Promise<void> {
 	return invoke<void>('open_url', { url });
+}
+
+/** Open a file in VS Code (or any editor registering the `vscode://` URL
+ *  handler — Cursor, VSCodium, etc.) at the given 1-indexed line. */
+export async function openInEditor(path: string, line?: number): Promise<void> {
+	return invoke<void>('open_in_editor', { path, line });
 }

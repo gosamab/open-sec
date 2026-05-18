@@ -15,17 +15,30 @@ use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::Finding;
 
 use super::types::{
-    kind_from_str, kind_str, new_scan_id, now_ms, severity_from_str, severity_str, ScanGroup,
-    StoredFinding,
+    kind_from_str, kind_str, severity_from_str, severity_str, ScanGroup, StoredFinding,
 };
 use super::Store;
 
 impl Store {
-    /// Persist a completed scan. Returns the new scan_id.
-    pub fn save_scan(&self, result: &ScanResult, status: &str) -> Result<String> {
-        let scan_id = new_scan_id();
-        let started_at = now_ms();
-
+    /// Upsert a scan row plus its findings. Idempotent — `run_pipeline`
+    /// calls this on every stage event with a freshly-built partial
+    /// `ScanResult`, so an interrupted scan leaves the work-so-far on disk
+    /// instead of vaporising every dollar spent up to that point. The final
+    /// call from `run_pipeline` carries the authoritative result + a
+    /// `completed` / `cancelled` status.
+    ///
+    /// Findings are sourced from `result.findings_by_file` (which is filled
+    /// in by detect, before verify runs) so a scan that crashes mid-verify
+    /// still carries every detected finding. Verdicts and patches overlay
+    /// on top, so partial state shows up as findings without verdicts/patches
+    /// rather than findings missing entirely.
+    pub fn save_scan(
+        &self,
+        scan_id: &str,
+        started_at: i64,
+        result: &ScanResult,
+        status: &str,
+    ) -> Result<()> {
         let mut conn = self.db();
         let tx = conn.transaction()?;
 
@@ -34,18 +47,33 @@ impl Store {
         let usage_json = json::to_string(&result.usage)?;
         let detect_errors_json = json::to_string(&result.detect_errors)?;
         let durations_json = json::to_string(&result.durations)?;
-        let total = result.verified.len() as i64;
+        let total: i64 = result
+            .findings_by_file
+            .iter()
+            .map(|ff| ff.findings.len() as i64)
+            .sum();
         let kept = result
             .verified
             .iter()
             .filter(|v| v.verdict.as_ref().map(|x| x.keep()).unwrap_or(false))
             .count() as i64;
 
+        // UPSERT — incremental saves overwrite themselves, started_at stays
+        // pinned to the first insert.
         tx.execute(
             "INSERT INTO scans (id, root, started_at, status,
                  total_findings, kept_findings,
                  walk_json, triaged_json, usage_json, detect_errors_json, durations_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                 status = excluded.status,
+                 total_findings = excluded.total_findings,
+                 kept_findings = excluded.kept_findings,
+                 walk_json = excluded.walk_json,
+                 triaged_json = excluded.triaged_json,
+                 usage_json = excluded.usage_json,
+                 detect_errors_json = excluded.detect_errors_json,
+                 durations_json = excluded.durations_json",
             params![
                 scan_id,
                 result.root.to_string_lossy(),
@@ -61,19 +89,20 @@ impl Store {
             ],
         )?;
 
-        let mut rel_by_file_path = std::collections::HashMap::new();
-        for ff in &result.findings_by_file {
-            for f in &ff.findings {
-                rel_by_file_path.insert(f.id.clone(), ff.rel_path.clone());
-            }
+        let mut verdict_by_id: std::collections::HashMap<&str, Option<&Verdict>> =
+            std::collections::HashMap::new();
+        for v in &result.verified {
+            verdict_by_id.insert(v.finding.id.as_str(), v.verdict.as_ref());
         }
-
         let mut patch_by_id: std::collections::HashMap<&str, &Patch> =
             std::collections::HashMap::new();
         for p in &result.patches {
             patch_by_id.insert(p.finding_id.as_str(), p);
         }
 
+        // Replace findings rows for this scan. Cheaper than reconciling
+        // per-row updates, and the volumes are small (≤ low thousands).
+        tx.execute("DELETE FROM findings WHERE scan_id = ?1", params![scan_id])?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO findings (scan_id, finding_id, rel_path, kind, severity, cwe, owasp,
@@ -81,42 +110,39 @@ impl Store {
                      verdict_json, patch_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
-            for v in &result.verified {
-                let f = &v.finding;
-                let rel = rel_by_file_path
-                    .get(&f.id)
-                    .cloned()
-                    .unwrap_or_else(|| f.file.clone());
-                let verdict_json = match &v.verdict {
-                    Some(verdict) => Some(json::to_string(verdict)?),
-                    None => None,
-                };
-                let patch_json = match patch_by_id.get(f.id.as_str()) {
-                    Some(p) => Some(json::to_string(p)?),
-                    None => None,
-                };
-                stmt.execute(params![
-                    scan_id,
-                    f.id,
-                    rel,
-                    kind_str(f.kind),
-                    severity_str(f.severity),
-                    f.cwe,
-                    f.owasp,
-                    f.title,
-                    f.file,
-                    f.line_start,
-                    f.line_end,
-                    f.description,
-                    f.data_flow,
-                    verdict_json,
-                    patch_json,
-                ])?;
+            for ff in &result.findings_by_file {
+                for f in &ff.findings {
+                    let verdict_json = match verdict_by_id.get(f.id.as_str()) {
+                        Some(Some(v)) => Some(json::to_string(v)?),
+                        _ => None,
+                    };
+                    let patch_json = match patch_by_id.get(f.id.as_str()) {
+                        Some(p) => Some(json::to_string(p)?),
+                        None => None,
+                    };
+                    stmt.execute(params![
+                        scan_id,
+                        f.id,
+                        ff.rel_path,
+                        kind_str(f.kind),
+                        severity_str(f.severity),
+                        f.cwe,
+                        f.owasp,
+                        f.title,
+                        f.file,
+                        f.line_start,
+                        f.line_end,
+                        f.description,
+                        f.data_flow,
+                        verdict_json,
+                        patch_json,
+                    ])?;
+                }
             }
         }
 
         tx.commit()?;
-        Ok(scan_id)
+        Ok(())
     }
 
     /// One row per root, showing the latest scan's metadata.
@@ -182,6 +208,7 @@ impl Store {
         let durations: StageDurations = json::from_str(&durations_json).unwrap_or_default();
         let status = match status_str.as_str() {
             "cancelled" => ScanStatus::Cancelled,
+            "running" => ScanStatus::Running,
             _ => ScanStatus::Completed,
         };
 
@@ -291,6 +318,18 @@ impl Store {
     pub fn delete_scans_for_root(&self, root: &str) -> Result<()> {
         let conn = self.db();
         conn.execute("DELETE FROM scans WHERE root = ?1", params![root])?;
+        Ok(())
+    }
+
+    /// Flip a scan row's status without rewriting its payload. Used to
+    /// finalize an interrupted run as cancelled when `run_pipeline`'s error
+    /// path can't synthesize a full `ScanResult`.
+    pub fn update_scan_status(&self, scan_id: &str, status: &str) -> Result<()> {
+        let conn = self.db();
+        conn.execute(
+            "UPDATE scans SET status = ?1 WHERE id = ?2",
+            params![status, scan_id],
+        )?;
         Ok(())
     }
 }

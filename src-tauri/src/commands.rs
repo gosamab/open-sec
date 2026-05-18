@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
@@ -12,13 +12,19 @@ use crate::providers::Provider;
 use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
 use crate::scanner::excerpts::{extract, Excerpt};
-use crate::scanner::orchestrate::{run_scan, ScanConfig, ScanEvent, ScanResult};
+use crate::scanner::ingest::WalkResult;
+use crate::scanner::orchestrate::{
+    run_scan, DetectError, FileFindings, ScanConfig, ScanEvent, ScanResult, ScanStatus,
+    StageDurations, StageUsage,
+};
 use crate::scanner::patch::{
     locate, propose_one, Located, Patch, PatchProposal, DEFAULT_PATCH_MODEL,
 };
 use crate::scanner::verify::VerifiedFinding;
 use crate::scanner::Finding;
-use crate::store::{AppliedPatchRecord, ScanGroup, Store, TriageRecord, TriageStatus};
+use crate::store::{
+    new_scan_id, now_ms, AppliedPatchRecord, ScanGroup, Store, TriageRecord, TriageStatus,
+};
 
 /// Shared, app-wide cancel handle. Only one scan can run at a time (single
 /// workspace UX), so a single slot is enough — when a new scan starts it
@@ -98,9 +104,45 @@ pub async fn scan_file(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Apply one `ScanEvent` to a partial `ScanResult` so the forwarder task
+/// can persist as-we-go. Events that don't change persistent state
+/// (`Started`, progress ticks, rate-limit notices) fall through to the
+/// catch-all and are silently ignored — they're UI-only signals.
+fn apply_event(partial: &mut ScanResult, event: &ScanEvent) {
+    match event {
+        ScanEvent::IngestComplete { walk } => partial.ingest = walk.clone(),
+        ScanEvent::TriageComplete { triaged } => partial.triaged = triaged.clone(),
+        ScanEvent::DetectFileComplete { rel_path, findings } => {
+            // The forwarder only sees rel_path; we don't have the absolute
+            // path on this side. `save_scan` reads `rel_path` exclusively,
+            // and the frontend treats `path` as a no-op decoration, so we
+            // stuff rel_path in both. The final save from `run_pipeline`
+            // overwrites this with the authoritative absolute path.
+            partial.findings_by_file.push(FileFindings {
+                path: PathBuf::from(rel_path),
+                rel_path: rel_path.clone(),
+                findings: findings.clone(),
+            });
+        }
+        ScanEvent::DetectFileErrored { rel_path, error } => {
+            partial.detect_errors.push(DetectError {
+                rel_path: rel_path.clone(),
+                error: error.clone(),
+            });
+        }
+        ScanEvent::VerifyComplete { verified } => partial.verified = verified.clone(),
+        ScanEvent::PatchComplete { patches } => partial.patches = patches.clone(),
+        ScanEvent::UsageUpdate { usage } => partial.usage = usage.clone(),
+        ScanEvent::DurationsUpdate { durations } => partial.durations = durations.clone(),
+        _ => {}
+    }
+}
+
 /// Run the full pipeline on a directory. Per-stage progress streams via the
-/// `scan:event` Tauri event; the final `ScanResult` is persisted to SQLite.
-/// `cancel_scan` makes this return the partial result with `status = cancelled`.
+/// `scan:event` Tauri event and is incrementally persisted to SQLite as
+/// each event arrives, so a crash or abrupt close leaves the work-so-far
+/// on disk. `cancel_scan` makes this return the partial result with
+/// `status = cancelled`.
 #[tauri::command]
 #[instrument(skip(app, store, cancel), fields(root = %root))]
 pub async fn run_pipeline(
@@ -119,11 +161,58 @@ pub async fn run_pipeline(
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
 
+    // Persistence identity for this scan — pinned upfront so every
+    // incremental save targets the same row via UPSERT.
+    let scan_id = new_scan_id();
+    let started_at = now_ms();
+    let root_clone = root_path.clone();
+
+    // Initial row so the launcher (and `load_scan`) can see the scan
+    // immediately, even before the first stage finishes.
+    let initial = ScanResult {
+        root: root_clone.clone(),
+        ingest: WalkResult::default(),
+        triaged: Vec::new(),
+        findings_by_file: Vec::new(),
+        detect_errors: Vec::new(),
+        verified: Vec::new(),
+        patches: Vec::new(),
+        usage: StageUsage::default(),
+        durations: StageDurations::default(),
+        status: ScanStatus::Running,
+    };
+    if let Err(e) = store.save_scan(&scan_id, started_at, &initial, ScanStatus::Running.as_str()) {
+        warn!(error = %format!("{e:#}"), "failed to insert initial scan row");
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<ScanEvent>();
 
     let app_for_events = app.clone();
+    let scan_id_for_task = scan_id.clone();
     let forward_task = tokio::spawn(async move {
+        let store: State<Store> = app_for_events.state();
+        let mut partial = ScanResult {
+            root: root_clone,
+            ingest: WalkResult::default(),
+            triaged: Vec::new(),
+            findings_by_file: Vec::new(),
+            detect_errors: Vec::new(),
+            verified: Vec::new(),
+            patches: Vec::new(),
+            usage: StageUsage::default(),
+            durations: StageDurations::default(),
+            status: ScanStatus::Running,
+        };
         while let Some(event) = rx.recv().await {
+            apply_event(&mut partial, &event);
+            if let Err(e) = store.save_scan(
+                &scan_id_for_task,
+                started_at,
+                &partial,
+                ScanStatus::Running.as_str(),
+            ) {
+                warn!(error = %format!("{e:#}"), "incremental save failed");
+            }
             if let Err(e) = app_for_events.emit("scan:event", &event) {
                 info!(error = %e, "failed to emit scan event; frontend disconnected?");
             }
@@ -136,6 +225,11 @@ pub async fn run_pipeline(
         .await
         .map_err(|e| {
             cancel.clear();
+            // Best-effort: flip the in-progress row to cancelled so it
+            // doesn't sit at "running" forever. The error path doesn't have
+            // a ScanResult; the existing partial state is whatever
+            // forward_task persisted last.
+            let _ = mark_scan_status(store.inner(), &scan_id, ScanStatus::Cancelled);
             format!("{e:#}")
         })?;
 
@@ -144,17 +238,24 @@ pub async fn run_pipeline(
     let was_cancelled = cancel_flag.load(Ordering::SeqCst);
     cancel.clear();
     result.status = if was_cancelled {
-        crate::scanner::orchestrate::ScanStatus::Cancelled
+        ScanStatus::Cancelled
     } else {
-        crate::scanner::orchestrate::ScanStatus::Completed
+        ScanStatus::Completed
     };
 
-    match store.save_scan(&result, result.status.as_str()) {
-        Ok(scan_id) => info!(scan_id = %scan_id, status = result.status.as_str(), "scan persisted"),
-        Err(e) => warn!(error = %format!("{e:#}"), "failed to persist scan"),
+    // Authoritative final save with absolute paths, full state, terminal status.
+    match store.save_scan(&scan_id, started_at, &result, result.status.as_str()) {
+        Ok(_) => info!(scan_id = %scan_id, status = result.status.as_str(), "scan persisted"),
+        Err(e) => warn!(error = %format!("{e:#}"), "failed to finalize scan"),
     }
 
     Ok(result)
+}
+
+/// Flip a scan row's status without touching its payload. Used on the
+/// run_pipeline error path to mark interrupted runs cancelled.
+fn mark_scan_status(store: &Store, scan_id: &str, status: ScanStatus) -> anyhow::Result<()> {
+    store.update_scan_status(scan_id, status.as_str())
 }
 
 /// Flag the running scan for cancellation. The pipeline finishes its
@@ -379,6 +480,30 @@ pub fn get_triage_for_root(
     store
         .get_triage_for_root(&root)
         .map_err(|e| format!("{e:#}"))
+}
+
+/// Open a file in VS Code at the given line via the `vscode://file/...:line`
+/// URL handler — same handler Cursor / VSCodium register, so it works for
+/// most VS Code-derived editors without per-editor config. macOS-only:
+/// shells out to `open(1)`, which routes the URL to whatever app claims it.
+/// Path is canonicalized and confirmed to exist first; we never pass raw
+/// user input into the URL.
+#[tauri::command]
+pub fn open_in_editor(path: String, line: Option<u32>) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    let canonical = p.canonicalize().map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let url = match line {
+        Some(l) if l > 0 => format!("vscode://file{}:{}", canonical.display(), l),
+        _ => format!("vscode://file{}", canonical.display()),
+    };
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| format!("open failed: {e}"))?;
+    Ok(())
 }
 
 /// Open a URL in the user's default browser. Scheme is whitelisted

@@ -228,7 +228,7 @@ async fn propose_many_filters_and_patches() {
         mk_vf(FindingKind::Vuln, Some(false)),
         mk_vf(FindingKind::Vuln, Some(true)),
     ];
-    let out = propose_many(verified, root, provider, "oneshot", 2).await;
+    let out = propose_many(verified, root, provider, "oneshot", 2, None).await;
     assert_eq!(out.len(), 1);
     assert!(out[0].diff.is_some());
 }

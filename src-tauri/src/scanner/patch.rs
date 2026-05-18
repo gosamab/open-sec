@@ -177,12 +177,17 @@ pub async fn propose_one(
 /// Propose patches for a batch of verified findings in parallel under a
 /// semaphore. Filters per spec: KEPT vulns and all hardening items.
 /// Findings that don't satisfy that get dropped from the output.
+///
+/// `on_item` fires once per patch attempt that completes (success or
+/// failure). Skipped findings (filtered by `should_patch`) don't tick — the
+/// orchestrator pre-computes `total = patchable` so the denominator matches.
 pub async fn propose_many(
     verified: Vec<VerifiedFinding>,
     scan_root: PathBuf,
     provider: Arc<dyn Provider>,
     model: &str,
     concurrency: usize,
+    on_item: Option<crate::scanner::verify::ProgressTick>,
 ) -> Vec<Patch> {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let model = model.to_string();
@@ -210,8 +215,13 @@ pub async fn propose_many(
 
     let mut out = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok(Some(p)) = joined {
-            out.push(p);
+        if let Ok(maybe) = joined {
+            if let Some(p) = maybe {
+                out.push(p);
+            }
+            if let Some(tick) = &on_item {
+                tick();
+            }
         }
     }
     out.sort_by(|a, b| {

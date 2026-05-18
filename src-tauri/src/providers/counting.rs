@@ -84,16 +84,23 @@ impl Provider for CountingProvider {
     }
 }
 
-/// Wraps an inner provider and short-circuits every `generate()` call with
-/// `ProviderError::Cancelled` once the shared flag flips to true.
-/// Already-running HTTP requests aren't aborted — but every agent loop
-/// checks `provider.generate()` before each iteration, so cancel takes
-/// effect at the next round-trip without needing to thread a cancellation
-/// token through every `*_many` signature.
+/// Wraps an inner provider and short-circuits `generate()` with
+/// `ProviderError::Cancelled` once the shared flag flips to true. The race
+/// is two-sided: we check before delegating, and while the inner call is
+/// in flight we poll the flag every `CANCEL_POLL_INTERVAL`. If the flag
+/// trips mid-call, dropping the pinned inner future aborts the underlying
+/// reqwest request — without that, an in-flight HTTP call can keep the
+/// agent loop alive for the full 10-minute reqwest timeout after the user
+/// has already clicked Cancel.
 pub struct CancellingProvider {
     inner: Arc<dyn Provider>,
     cancel: Arc<AtomicBool>,
 }
+
+/// How often to wake up and re-check the cancel flag while an inner
+/// `generate()` is in flight. Small enough that cancel feels instant; large
+/// enough that the wakeups are negligible next to multi-second API calls.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 impl CancellingProvider {
     pub fn new(inner: Arc<dyn Provider>, cancel: Arc<AtomicBool>) -> Self {
@@ -109,9 +116,21 @@ impl Provider for CancellingProvider {
 
     async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response> {
         if self.cancel.load(Ordering::Relaxed) {
-            return Err(crate::error::ProviderError::Cancelled);
+            return Err(ProviderError::Cancelled);
         }
-        self.inner.generate(req).await
+        let inner = self.inner.generate(req);
+        tokio::pin!(inner);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut inner => return result,
+                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(ProviderError::Cancelled);
+                    }
+                }
+            }
+        }
     }
 }
 

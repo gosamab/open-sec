@@ -11,7 +11,7 @@
 	let { root, keyConfigured, onScan }: Props = $props();
 </script>
 
-<div class="flex flex-1 items-center justify-center overflow-y-auto px-8 py-10">
+<div class="flex flex-1 justify-center overflow-y-auto px-8 pt-16 pb-10">
 	<div class="flex w-full max-w-3xl flex-col gap-6">
 		<div class="space-y-1.5">
 			<h2 class="text-xl font-semibold tracking-tight">Ready to scan</h2>

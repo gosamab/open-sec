@@ -11,8 +11,13 @@
 		stage: string;
 		rateLimitNotice: { attempt: number; retry_after_secs: number } | null;
 		durations: StageDurations;
+		/** True while the scan is in flight. Drives the live duration counter. */
+		scanning: boolean;
+		/** `Date.now()` taken when the scan started. Null when no scan is running
+		 *  (e.g. a past scan was hydrated); falls back to `durations.total_ms`. */
+		scanStartedAt: number | null;
 	}
-	let { stageIndex, stage, rateLimitNotice, durations }: Props = $props();
+	let { stageIndex, stage, rateLimitNotice, durations, scanning, scanStartedAt }: Props = $props();
 
 	function stateOf(i: number): 'done' | 'active' | 'pending' {
 		if (stageIndex === PIPELINE_STAGES.length) return 'done';
@@ -20,6 +25,23 @@
 		if (i === stageIndex) return 'active';
 		return 'pending';
 	}
+
+	// Tick a clock while a scan is running so the displayed total stays current
+	// between stage boundaries (orchestrator only emits durations_update at
+	// stage finish, so without this the number freezes for the full detect run).
+	let nowMs = $state(Date.now());
+	$effect(() => {
+		if (!scanning || scanStartedAt === null) return;
+		nowMs = Date.now();
+		const id = window.setInterval(() => {
+			nowMs = Date.now();
+		}, 250);
+		return () => window.clearInterval(id);
+	});
+
+	let displayMs = $derived(
+		scanning && scanStartedAt !== null ? nowMs - scanStartedAt : durations.total_ms
+	);
 </script>
 
 <div class="flex items-center gap-3 border-b border-border bg-muted/20 px-4 py-2">
@@ -60,9 +82,9 @@
 			rate-limited · retry #{rateLimitNotice.attempt} in {rateLimitNotice.retry_after_secs}s
 		</span>
 	{/if}
-	{#if durations.total_ms > 0}
+	{#if displayMs > 0}
 		<span class="shrink-0 font-mono text-xs text-muted-foreground" title="Total scan duration">
-			{formatDuration(durations.total_ms)}
+			{formatDuration(displayMs)}
 		</span>
 	{/if}
 	<span class="shrink-0 font-mono text-xs text-muted-foreground">{stage}</span>

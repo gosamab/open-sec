@@ -1,17 +1,14 @@
 <script lang="ts">
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import FindingBadges from '$lib/components/FindingBadges.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import { renderInlineMd, renderMd } from '$lib/markdown';
 	import type { Excerpt, Finding, Patch, TriageRecord, TriageStatus, Verdict } from '$lib/ipc';
 	import { referencesFor } from '$lib/references';
 	import {
 		diffLineClass,
-		findingStatus,
 		parseDataFlow,
-		severityClass,
-		statusClass,
-		statusLabelFor,
 		type FindingStatusInputs
 	} from '$lib/scan-display';
 
@@ -89,11 +86,7 @@
 <article class="divide-y divide-border">
 	<header class="space-y-2 px-5 py-4">
 		<div class="flex flex-wrap items-center gap-1.5">
-			<Badge class={severityClass(finding.severity)}>{finding.severity}</Badge>
-			<Badge class={statusClass(findingStatus(finding, statusInputs))}>
-				{statusLabelFor(finding, statusInputs)}
-			</Badge>
-			<Badge variant="outline">{finding.kind}</Badge>
+			<FindingBadges {finding} {statusInputs} showKind />
 			<span class="font-mono text-xs text-muted-foreground">{finding.cwe}</span>
 			{#if finding.owasp}
 				<span class="font-mono text-xs text-muted-foreground">· OWASP {finding.owasp}</span>

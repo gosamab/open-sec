@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
+	import FindingBadges from '$lib/components/FindingBadges.svelte';
 	import type { Finding, Severity } from '$lib/ipc';
 	import type { FileNode } from '$lib/tree';
 	import {
@@ -12,7 +12,6 @@
 		severityClass,
 		skipReasonLabel,
 		statusClass,
-		statusLabelFor,
 		STATUS_OPTIONS,
 		type FindingStatus,
 		type FindingStatusInputs,
@@ -442,8 +441,7 @@
 					<div class="flex items-start justify-between gap-2">
 						<div class="flex-1 space-y-1">
 							<div class="flex flex-wrap items-center gap-1.5">
-								<Badge class={severityClass(f.severity)}>{f.severity}</Badge>
-								<Badge class={statusClass(status)}>{statusLabelFor(f, statusInputs)}</Badge>
+								<FindingBadges finding={f} {statusInputs} />
 								<span class="font-mono text-xs text-muted-foreground">{f.cwe}</span>
 								{#if f.owasp}
 									<span class="font-mono text-xs text-muted-foreground">

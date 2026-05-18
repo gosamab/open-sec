@@ -10,20 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{debug, info, instrument, warn};
+use tracing::{instrument, warn};
 
-use crate::providers::{
-    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
-    SystemBlock,
-};
-use crate::scanner::util::{collect_text, extract_json_object, resolve_focus_path, with_line_numbers};
+use crate::providers::Provider;
+use crate::scanner::agent_loop::{run_agent_loop, AgentRequest};
+use crate::scanner::util::{extract_json_object, resolve_focus_path, with_line_numbers};
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
 
 pub const DEFAULT_VERIFY_MODEL: &str = "claude-opus-4-7";
 pub const DEFAULT_VERIFY_CONCURRENCY: usize = 2;
 const MAX_TOKENS: u32 = 4096;
-const MAX_TOOL_ITERATIONS: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -157,10 +154,6 @@ Your FINAL assistant message MUST be the JSON object alone. No tool calls
 in that final message; no prose other than the JSON.
 "#;
 
-fn system_prompt() -> String {
-    format!("{TOOLS_PREAMBLE}\n{BASE_VERIFY_PROMPT}")
-}
-
 /// Verify a single finding against its focus file. Hardening findings bypass
 /// the verifier (returns `VerifiedFinding { verdict: None }`). For `vuln`
 /// findings, runs the agent loop and returns the parsed verdict.
@@ -184,7 +177,7 @@ pub async fn verify_one(
         .await
         .with_context(|| format!("read focus file {}", focus_path.display()))?;
 
-    let initial = format!(
+    let initial_user_msg = format!(
         "Scan root: {root}\nFocus file: {file}\n\nCandidate finding (from detection):\n{finding}\n\nFocus file with line numbers:\n\n{src}",
         root = canonical_root.display(),
         file = finding.file,
@@ -192,87 +185,26 @@ pub async fn verify_one(
         src = with_line_numbers(&source),
     );
 
-    let mut messages: Vec<Message> = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text { text: initial }],
-    }];
-    let tool_defs = tools::tool_definitions();
+    // No `temperature` — Opus 4.7 rejects it ("deprecated for this model");
+    // Sonnet/Haiku silently accept its absence, so unset is the most
+    // compatible choice across the three stage models.
+    let final_text = run_agent_loop(AgentRequest {
+        system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_VERIFY_PROMPT}"),
+        initial_user_msg,
+        model,
+        max_tokens: MAX_TOKENS,
+        temperature: None,
+        canonical_root: &canonical_root,
+        provider,
+        stage_label: "verifier",
+    })
+    .await?;
 
-    for iteration in 0..MAX_TOOL_ITERATIONS {
-        // No `temperature` — Opus 4.7 rejects it ("deprecated for this model").
-        // Sonnet/Haiku silently accept its absence, so leaving it unset is
-        // the most-compatible choice across the three stage models.
-        let mut req = GenerationRequest::new(model, MAX_TOKENS);
-        req.system
-            .push(SystemBlock::text(system_prompt()).with_cache(CacheControl::ephemeral_1h()));
-        req.tools = tool_defs.clone();
-        req.messages = messages.clone();
-
-        let resp = provider
-            .generate(req)
-            .await
-            .context("anthropic generate call failed")?;
-
-        debug!(
-            iteration,
-            stop_reason = ?resp.stop_reason,
-            input_tokens = resp.usage.input_tokens,
-            output_tokens = resp.usage.output_tokens,
-            cache_read = resp.usage.cache_read_input_tokens,
-            "verify iteration"
-        );
-
-        messages.push(Message {
-            role: Role::Assistant,
-            content: resp.content.clone(),
-        });
-
-        let tool_uses: Vec<(String, String, Value)> = resp
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-
-        if tool_uses.is_empty() {
-            if !matches!(resp.stop_reason, Some(StopReason::EndTurn) | None) {
-                warn!(stop_reason = ?resp.stop_reason, "no tool calls but non-end_turn stop reason");
-            }
-            let text = collect_text(&resp.content);
-            let verdict = parse_verdict(&text)?;
-            return Ok(VerifiedFinding {
-                finding,
-                verdict: Some(verdict),
-            });
-        }
-
-        info!(iteration, tool_calls = tool_uses.len(), "verify tool calls");
-
-        let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-        for (id, name, input) in &tool_uses {
-            let (content, is_error) = match tools::dispatch(name, input, &canonical_root).await {
-                Ok(s) => (s, false),
-                Err(e) => (format!("error: {e:#}"), true),
-            };
-            tool_results.push(ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
-                content,
-                is_error,
-            });
-        }
-        messages.push(Message {
-            role: Role::User,
-            content: tool_results,
-        });
-    }
-
-    Err(anyhow!(
-        "verifier hit the {MAX_TOOL_ITERATIONS}-iteration tool-use cap without a final answer"
-    ))
+    let verdict = parse_verdict(&final_text)?;
+    Ok(VerifiedFinding {
+        finding,
+        verdict: Some(verdict),
+    })
 }
 
 /// Verify many findings in parallel. Caps concurrency at `concurrency` (use
@@ -352,7 +284,7 @@ fn parse_verdict(text: &str) -> Result<Verdict> {
 mod tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Response, Usage};
+    use crate::providers::{ContentBlock, GenerationRequest, Response, StopReason, Usage};
     use crate::scanner::Severity;
     use async_trait::async_trait;
     use std::sync::Mutex;

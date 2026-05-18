@@ -45,6 +45,7 @@ pub fn run() {
                 ),
             };
             std::fs::create_dir_all(&app_data).ok();
+            config::init_key_path(&app_data);
             let db_path = app_data.join("open-sec.db");
             let store = match store::Store::open(&db_path) {
                 Ok(s) => s,

@@ -60,7 +60,7 @@ pub fn has_anthropic_key() -> bool {
 
 #[tauri::command]
 pub fn set_anthropic_key(key: String) -> Result<(), String> {
-    config::store_anthropic_key(&key).map_err(|e| e.to_string())
+    config::store_anthropic_key(&key).map_err(|e| format!("{e:#}"))
 }
 
 /// Scan a single file using the full agent loop (tools enabled).

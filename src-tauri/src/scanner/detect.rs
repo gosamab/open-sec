@@ -2,19 +2,16 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
-use tracing::{debug, info, instrument, warn};
+use tracing::instrument;
 
-use crate::providers::{
-    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
-    SystemBlock,
-};
-use crate::scanner::util::{collect_text, extract_json_object, with_line_numbers};
+use crate::providers::Provider;
+use crate::scanner::agent_loop::{run_agent_loop, AgentRequest};
+use crate::scanner::util::{extract_json_object, with_line_numbers};
 use crate::scanner::Finding;
 use crate::tools;
 
 pub const DEFAULT_DETECT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
-const MAX_TOOL_ITERATIONS: usize = 25;
 
 /// Tool-agnostic core of the detection prompt: role, output schema, severity
 /// guide, and rules. Used verbatim in no-tools mode and prefixed with
@@ -85,10 +82,6 @@ Your FINAL assistant message MUST be the JSON object alone. No tool calls in
 that final message; no prose other than the JSON.
 "#;
 
-fn system_prompt() -> String {
-    format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}")
-}
-
 #[derive(Deserialize)]
 struct FindingsEnvelope {
     findings: Vec<Finding>,
@@ -108,7 +101,7 @@ pub async fn scan_with_tools(
     let canonical_root = tools::sandbox::canonical_root(scan_root)?;
     let file_label = file_path.display().to_string();
 
-    let initial = format!(
+    let initial_user_msg = format!(
         "Focus file: {file_label}\n\nThe scan root is {}. \
          You may use the provided tools to read other files under that root.\n\n\
          Here is the focus file with line numbers:\n\n{}",
@@ -116,89 +109,19 @@ pub async fn scan_with_tools(
         with_line_numbers(source),
     );
 
-    let mut messages: Vec<Message> = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text { text: initial }],
-    }];
+    let final_text = run_agent_loop(AgentRequest {
+        system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}"),
+        initial_user_msg,
+        model,
+        max_tokens: DEFAULT_MAX_TOKENS,
+        temperature: Some(0.0),
+        canonical_root: &canonical_root,
+        provider,
+        stage_label: "detect",
+    })
+    .await?;
 
-    let tool_defs = tools::tool_definitions();
-
-    for iteration in 0..MAX_TOOL_ITERATIONS {
-        let mut req = GenerationRequest::new(model, DEFAULT_MAX_TOKENS);
-        req.temperature = Some(0.0);
-        req.system.push(
-            SystemBlock::text(system_prompt()).with_cache(CacheControl::ephemeral_1h()),
-        );
-        req.tools = tool_defs.clone();
-        req.messages = messages.clone();
-
-        let resp = provider
-            .generate(req)
-            .await
-            .context("anthropic generate call failed")?;
-
-        debug!(
-            iteration,
-            stop_reason = ?resp.stop_reason,
-            input_tokens = resp.usage.input_tokens,
-            output_tokens = resp.usage.output_tokens,
-            cache_read = resp.usage.cache_read_input_tokens,
-            "detect iteration"
-        );
-
-        // Always append the assistant's response so that any tool_use blocks
-        // are referenced by their tool_use_id in the next turn.
-        messages.push(Message {
-            role: Role::Assistant,
-            content: resp.content.clone(),
-        });
-
-        let tool_uses: Vec<(String, String, serde_json::Value)> = resp
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-
-        if tool_uses.is_empty() {
-            if !matches!(resp.stop_reason, Some(StopReason::EndTurn) | None) {
-                warn!(stop_reason = ?resp.stop_reason, "no tool calls but non-end_turn stop reason");
-            }
-            let text = collect_text(&resp.content);
-            return finalize(&text, &file_label);
-        }
-
-        info!(
-            iteration,
-            tool_calls = tool_uses.len(),
-            "executing tool calls"
-        );
-
-        let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-        for (id, name, input) in &tool_uses {
-            let (content, is_error) = match tools::dispatch(name, input, &canonical_root).await {
-                Ok(s) => (s, false),
-                Err(e) => (format!("error: {e:#}"), true),
-            };
-            tool_results.push(ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
-                content,
-                is_error,
-            });
-        }
-        messages.push(Message {
-            role: Role::User,
-            content: tool_results,
-        });
-    }
-
-    Err(anyhow!(
-        "hit the {MAX_TOOL_ITERATIONS}-iteration tool-use cap without a final answer"
-    ))
+    finalize(&final_text, &file_label)
 }
 
 fn finalize(text: &str, file_label: &str) -> Result<Vec<Finding>> {
@@ -218,7 +141,10 @@ fn finalize(text: &str, file_label: &str) -> Result<Vec<Finding>> {
 mod agent_tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Provider, Response, Usage};
+    use crate::providers::{
+        ContentBlock, GenerationRequest, Provider, Response, Role, StopReason, Usage,
+    };
+    use crate::scanner::agent_loop::MAX_TOOL_ITERATIONS;
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Mutex;

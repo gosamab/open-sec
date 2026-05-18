@@ -1,3 +1,4 @@
+mod agent_loop;
 pub mod detect;
 pub mod excerpts;
 pub mod ingest;

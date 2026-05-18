@@ -1,23 +1,16 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 
-	import ApiKeyPrompt from '$lib/components/ApiKeyPrompt.svelte';
-	import FileTree from '$lib/components/FileTree.svelte';
-	import FindingDetail from '$lib/components/FindingDetail.svelte';
-	import FileStatusDetail from '$lib/components/FileStatusDetail.svelte';
-	import FindingsList from '$lib/components/FindingsList.svelte';
 	import Launcher from '$lib/components/Launcher.svelte';
-	import OnboardingPanel from '$lib/components/OnboardingPanel.svelte';
-	import PipelineProgress from '$lib/components/PipelineProgress.svelte';
-	import ScanSummary from '$lib/components/ScanSummary.svelte';
 	import Settings from '$lib/components/Settings.svelte';
-	import WorkspaceTopBar from '$lib/components/WorkspaceTopBar.svelte';
+	import WorkspaceView from '$lib/components/WorkspaceView.svelte';
 	import { asScanConfig, settings } from '$lib/settings.svelte';
 	import { highlightCode, highlightDiff } from '$lib/shiki.svelte';
 	import { stageIndex } from '$lib/pipeline';
+	import { scan } from '$lib/stores/scan-state.svelte';
+	import { triage } from '$lib/stores/triage-state.svelte';
+	import { ui } from '$lib/stores/ui-state.svelte';
 	import {
-		EMPTY_STAGE_USAGE,
-		EMPTY_STAGE_DURATIONS,
 		applyPatch,
 		cancelScan,
 		clearTriage,
@@ -34,19 +27,14 @@
 		runPipeline,
 		scanFile,
 		setTriage,
+		EMPTY_STAGE_DURATIONS,
 		type Excerpt,
 		type Finding,
 		type Patch,
-		type Priority,
 		type ScanGroup,
 		type ScanResult,
 		type Severity,
-		type StageDurations,
-		type StageUsage,
-		type TriagedFile,
-		type TriageRecord,
 		type TriageStatus,
-		type Verdict,
 		type VerifiedFinding
 	} from '$lib/ipc';
 	import {
@@ -58,154 +46,95 @@
 		nestFiles
 	} from '$lib/tree';
 	import {
-		DEFAULT_FINDINGS_FILTER,
-		SEVERITY_ORDER,
 		applyFindingsFilter,
 		findingStatus,
 		humanizeError,
 		severityRank,
 		type FindingStatus,
-		type FindingStatusInputs,
-		type FindingsFilter
+		type FindingStatusInputs
 	} from '$lib/scan-display';
 	import type { UnlistenFn } from '@tauri-apps/api/event';
 
-	// ---------- state ----------------------------------------------------
-	let keyConfigured = $state(false);
-
-	let root = $state('');
-	let scanning = $state(false);
-	let cancelling = $state(false);
-	let stage = $state<string>('idle');
-	let error = $state<string | null>(null);
-
-	type View = 'launcher' | 'workspace';
-	let view = $state<View>('launcher');
-
-	let walk = $state<ScanResult['ingest'] | null>(null);
-	let triaged = $state<TriagedFile[]>([]);
-	let findingsByFile = $state<Map<string, Finding[]>>(new Map());
-	let detectErrors = $state<Map<string, string>>(new Map());
-	let verdictById = $state<Map<string, Verdict | null>>(new Map());
-	let patchById = $state<Map<string, Patch>>(new Map());
-	let usage = $state<StageUsage>(EMPTY_STAGE_USAGE);
-	let durations = $state<StageDurations>(EMPTY_STAGE_DURATIONS);
-	let rateLimitNotice = $state<{ attempt: number; retry_after_secs: number } | null>(null);
-	let scanResult = $state<ScanResult | null>(null);
-
-	let triageById = $state<Map<string, TriageRecord>>(new Map());
-	let triageBusy = $state(false);
-
-	let appliedPatchIds = $state<Set<string>>(new Set());
-	let applyBusy = $state(false);
-	let applyError = $state<string | null>(null);
-
-	let patchHistoryById = $state<Map<string, Patch[]>>(new Map());
-	let regenBusy = $state(false);
-	let regenError = $state<string | null>(null);
-
-	let dismissDraftFor = $state<string | null>(null);
-	let dismissReason = $state('');
-
-	// Persisted UI preference — long-lived across sessions.
-	const HIDE_DISMISSED_KEY = 'open-sec:hide-dismissed';
-	let hideDismissed = $state<boolean>(
-		typeof window !== 'undefined'
-			? window.localStorage.getItem(HIDE_DISMISSED_KEY) !== 'false'
-			: true
-	);
-	$effect(() => {
-		if (typeof window === 'undefined') return;
-		try {
-			window.localStorage.setItem(HIDE_DISMISSED_KEY, String(hideDismissed));
-		} catch {
-			// quota / disabled — silent
-		}
-	});
-
-	let selectedFile = $state<string | null>(null);
-	let selectedFindingId = $state<string | null>(null);
-	let filter = $state('');
-	let filterConfig = $state<FindingsFilter>({ ...DEFAULT_FINDINGS_FILTER });
-	/** rel_paths currently being retried after a detect error. The summary
-	 *  shows a per-row spinner; on success we drop the error and merge the
-	 *  fresh findings in. Note: scan_file only re-runs DETECT — retried files
-	 *  won't get verdicts/patches without a full re-scan. */
-	let retryingFiles = $state<Set<string>>(new Set());
-
-	let resultRoot = $state<string | null>(null);
+	// All persistent UI / scan / triage state lives in $lib/stores. This
+	// route owns: the event-stream subscription, action handlers that mutate
+	// stores, the derived values WorkspaceView needs, and the few effects
+	// that touch DOM/localStorage.
 
 	let unlisten: UnlistenFn | null = null;
-	let settingsOpen = $state(false);
-
 	const SNOOZE_DAYS = 7;
+
+	// Persist `hideDismissed` toggle.
+	$effect(() => {
+		void ui.hideDismissed;
+		ui.persistHideDismissed();
+	});
 
 	// ---------- helpers shared between the route and children -----------
 	let statusInputs: FindingStatusInputs = $derived({
-		triageById,
-		appliedPatchIds,
-		verdictById,
-		scanning
+		triageById: triage.triageById,
+		appliedPatchIds: triage.appliedPatchIds,
+		verdictById: scan.verdictById,
+		scanning: scan.scanning
 	});
 
 	// ---------- lifecycle ------------------------------------------------
 	onMount(async () => {
-		keyConfigured = await hasAnthropicKey();
+		scan.keyConfigured = await hasAnthropicKey();
 		unlisten = await listenScanEvents((ev) => {
 			switch (ev.kind) {
 				case 'started':
-					stage = 'scanning…';
+					scan.stage = 'scanning…';
 					break;
 				case 'ingest_complete':
-					walk = ev.walk;
-					stage = `triaging ${ev.walk.candidates.length} file(s)…`;
+					scan.walk = ev.walk;
+					scan.stage = `triaging ${ev.walk.candidates.length} file(s)…`;
 					break;
 				case 'triage_complete':
-					triaged = ev.triaged;
+					scan.triaged = ev.triaged;
 					const keepers = ev.triaged.filter((t) => t.result.priority !== 'skip').length;
-					stage = `detecting on ${keepers} file(s)…`;
+					scan.stage = `detecting on ${keepers} file(s)…`;
 					break;
 				case 'detect_file_complete': {
-					const next = new Map(findingsByFile);
+					const next = new Map(scan.findingsByFile);
 					next.set(ev.rel_path, ev.findings);
-					findingsByFile = next;
+					scan.findingsByFile = next;
 					break;
 				}
 				case 'detect_file_errored': {
-					const f = new Map(findingsByFile);
+					const f = new Map(scan.findingsByFile);
 					f.set(ev.rel_path, []);
-					findingsByFile = f;
-					const e = new Map(detectErrors);
+					scan.findingsByFile = f;
+					const e = new Map(scan.detectErrors);
 					e.set(ev.rel_path, ev.error);
-					detectErrors = e;
+					scan.detectErrors = e;
 					break;
 				}
 				case 'detect_complete':
-					stage = `verifying ${ev.total} finding(s)…`;
+					scan.stage = `verifying ${ev.total} finding(s)…`;
 					break;
 				case 'verify_complete': {
-					const next = new Map(verdictById);
+					const next = new Map(scan.verdictById);
 					for (const v of ev.verified) next.set(v.finding.id, v.verdict);
-					verdictById = next;
-					stage = 'proposing patches…';
+					scan.verdictById = next;
+					scan.stage = 'proposing patches…';
 					break;
 				}
 				case 'patch_complete': {
-					const next = new Map(patchById);
+					const next = new Map(scan.patchById);
 					for (const p of ev.patches) next.set(p.finding_id, p);
-					patchById = next;
-					stage = 'done';
+					scan.patchById = next;
+					scan.stage = 'done';
 					break;
 				}
 				case 'usage_update':
-					usage = ev.usage;
-					rateLimitNotice = null;
+					scan.usage = ev.usage;
+					scan.rateLimitNotice = null;
 					break;
 				case 'durations_update':
-					durations = ev.durations;
+					scan.durations = ev.durations;
 					break;
 				case 'rate_limited':
-					rateLimitNotice = {
+					scan.rateLimitNotice = {
 						attempt: ev.attempt,
 						retry_after_secs: ev.retry_after_secs
 					};
@@ -220,9 +149,9 @@
 
 	// ---------- patch variants ------------------------------------------
 	function patchHistoryFor(findingId: string): Patch[] {
-		const history = patchHistoryById.get(findingId);
+		const history = scan.patchHistoryById.get(findingId);
 		if (history && history.length > 0) return history;
-		const current = patchById.get(findingId);
+		const current = scan.patchById.get(findingId);
 		return current ? [current] : [];
 	}
 
@@ -241,111 +170,101 @@
 		const list = patchHistoryFor(selectedFinding.id);
 		const v = list[idx];
 		if (!v) return;
-		const next = new Map(patchById);
+		const next = new Map(scan.patchById);
 		next.set(selectedFinding.id, v);
-		patchById = next;
+		scan.patchById = next;
 	}
 
 	async function regenerateAlternative() {
-		if (!selectedFinding || !root) return;
+		if (!selectedFinding || !scan.root) return;
 		const verified = verifiedFor(selectedFinding);
 		if (!verified) return;
-		regenBusy = true;
-		regenError = null;
+		triage.regenBusy = true;
+		triage.regenError = null;
 		try {
 			const existing = patchHistoryFor(selectedFinding.id);
 			const priors = existing.map((p) => p.proposal);
-			const newPatch = await regeneratePatch(root, verified, priors);
+			const newPatch = await regeneratePatch(scan.root, verified, priors);
 			const history = [...existing, newPatch];
-			const histMap = new Map(patchHistoryById);
+			const histMap = new Map(scan.patchHistoryById);
 			histMap.set(selectedFinding.id, history);
-			patchHistoryById = histMap;
-			const pbi = new Map(patchById);
+			scan.patchHistoryById = histMap;
+			const pbi = new Map(scan.patchById);
 			pbi.set(selectedFinding.id, newPatch);
-			patchById = pbi;
+			scan.patchById = pbi;
 		} catch (e) {
-			regenError = e instanceof Error ? e.message : String(e);
+			triage.regenError = e instanceof Error ? e.message : String(e);
 		} finally {
-			regenBusy = false;
+			triage.regenBusy = false;
 		}
 	}
 
 	function verifiedFor(f: Finding): VerifiedFinding | null {
-		if (!scanResult) return { finding: f, verdict: verdictById.get(f.id) ?? null };
-		const v = scanResult.verified.find((x) => x.finding.id === f.id);
-		return v ?? { finding: f, verdict: verdictById.get(f.id) ?? null };
+		if (!scan.scanResult) return { finding: f, verdict: scan.verdictById.get(f.id) ?? null };
+		const v = scan.scanResult.verified.find((x) => x.finding.id === f.id);
+		return v ?? { finding: f, verdict: scan.verdictById.get(f.id) ?? null };
 	}
 
 	async function applySelectedPatch() {
 		if (!selectedPatch || !selectedFinding) return;
-		applyBusy = true;
-		applyError = null;
+		triage.applyBusy = true;
+		triage.applyError = null;
 		try {
 			const result = await applyPatch(
 				selectedFinding.id,
-				root,
+				scan.root,
 				selectedPatch.proposal.file,
 				selectedPatch.proposal.old_block,
 				selectedPatch.proposal.new_block
 			);
 			if (result.located.kind === 'not_found' || result.bytes_written === 0) {
-				applyError = 'Patch could not be located in the file — nothing was written.';
+				triage.applyError = 'Patch could not be located in the file — nothing was written.';
 				return;
 			}
-			const next = new Set(appliedPatchIds);
+			const next = new Set(triage.appliedPatchIds);
 			next.add(selectedFinding.id);
-			appliedPatchIds = next;
+			triage.appliedPatchIds = next;
 		} catch (e) {
-			applyError = e instanceof Error ? e.message : String(e);
+			triage.applyError = e instanceof Error ? e.message : String(e);
 		} finally {
-			applyBusy = false;
+			triage.applyBusy = false;
 		}
 	}
 
 	// ---------- scan actions --------------------------------------------
 	async function runScan() {
-		if (!root || scanning) return;
-		scanning = true;
-		cancelling = false;
-		error = null;
-		stage = 'starting…';
-		walk = null;
-		triaged = [];
-		findingsByFile = new Map();
-		detectErrors = new Map();
-		verdictById = new Map();
-		patchById = new Map();
-		usage = EMPTY_STAGE_USAGE;
-		durations = EMPTY_STAGE_DURATIONS;
-		rateLimitNotice = null;
-		scanResult = null;
-		selectedFile = null;
-		selectedFindingId = null;
-		triageById = new Map();
-		appliedPatchIds = new Set();
-		filterConfig = { ...DEFAULT_FINDINGS_FILTER };
+		if (!scan.root || scan.scanning) return;
+		scan.scanning = true;
+		scan.cancelling = false;
+		scan.error = null;
+		scan.stage = 'starting…';
+		scan.resetResults();
+		ui.resetSelection();
+		triage.triageById = new Map();
+		triage.appliedPatchIds = new Set();
 		try {
-			scanResult = await runPipeline(root, asScanConfig(settings.value));
-			resultRoot = root;
-			stage = scanResult.status === 'cancelled' ? 'cancelled' : 'done';
+			scan.scanResult = await runPipeline(scan.root, asScanConfig(settings.value));
+			scan.resultRoot = scan.root;
+			scan.stage = scan.scanResult.status === 'cancelled' ? 'cancelled' : 'done';
 			await reloadTriageForCurrentRoot();
 			await reloadAppliedForCurrentRoot();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-			stage = 'error';
+			scan.error = e instanceof Error ? e.message : String(e);
+			scan.stage = 'error';
 		} finally {
-			scanning = false;
-			cancelling = false;
+			scan.scanning = false;
+			scan.cancelling = false;
 		}
 	}
 
 	async function exportTo(format: 'markdown' | 'sarif') {
-		if (!root) return;
+		if (!scan.root) return;
 		try {
-			const content = format === 'markdown' ? await exportMarkdown(root) : await exportSarif(root);
+			const content =
+				format === 'markdown' ? await exportMarkdown(scan.root) : await exportSarif(scan.root);
 			const { save } = await import('@tauri-apps/plugin-dialog');
 			const ext = format === 'markdown' ? 'md' : 'sarif.json';
-			const stem = root.split(/[\\/]/).pop() || 'scan';
+			const stem = scan.root.split(/[\\/]/).pop() || 'scan';
 			const target = await save({
 				title: format === 'markdown' ? 'Save markdown report' : 'Save SARIF report',
 				defaultPath: `${stem}-open-sec.${ext}`,
@@ -359,14 +278,14 @@
 			if (typeof target !== 'string') return;
 			await saveTextFile(target, content);
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			scan.error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
 	async function requestCancel() {
-		if (!scanning || cancelling) return;
-		cancelling = true;
-		stage = 'cancelling…';
+		if (!scan.scanning || scan.cancelling) return;
+		scan.cancelling = true;
+		scan.stage = 'cancelling…';
 		try {
 			await cancelScan();
 		} catch (e) {
@@ -376,67 +295,45 @@
 
 	/** Wipe previous-scan state when the user opens a different project. */
 	$effect(() => {
-		if (scanning) return;
-		if (resultRoot === null) return;
-		if (root === resultRoot) return;
-		walk = null;
-		triaged = [];
-		findingsByFile = new Map();
-		detectErrors = new Map();
-		verdictById = new Map();
-		patchById = new Map();
-		usage = EMPTY_STAGE_USAGE;
-		durations = EMPTY_STAGE_DURATIONS;
-		rateLimitNotice = null;
-		scanResult = null;
-		selectedFile = null;
-		selectedFindingId = null;
-		filter = '';
-		stage = 'idle';
-		resultRoot = null;
+		if (scan.scanning) return;
+		if (scan.resultRoot === null) return;
+		if (scan.root === scan.resultRoot) return;
+		scan.resetResults();
+		ui.resetSelection();
+		scan.stage = 'idle';
+		scan.resultRoot = null;
 	});
 
 	function resetWorkspace() {
-		walk = null;
-		triaged = [];
-		findingsByFile = new Map();
-		detectErrors = new Map();
-		verdictById = new Map();
-		patchById = new Map();
-		usage = EMPTY_STAGE_USAGE;
-		durations = EMPTY_STAGE_DURATIONS;
-		rateLimitNotice = null;
-		scanResult = null;
-		selectedFile = null;
-		selectedFindingId = null;
-		filter = '';
-		stage = 'idle';
-		error = null;
-		resultRoot = null;
-		triageById = new Map();
-		dismissDraftFor = null;
-		dismissReason = '';
+		scan.resetResults();
+		ui.resetSelection();
+		scan.stage = 'idle';
+		scan.error = null;
+		scan.resultRoot = null;
+		triage.triageById = new Map();
+		triage.dismissDraftFor = null;
+		triage.dismissReason = '';
 	}
 
 	async function reloadTriageForCurrentRoot() {
-		if (!root) return;
+		if (!scan.root) return;
 		try {
-			const rs = await getTriageForRoot(root);
-			const m = new Map<string, TriageRecord>();
+			const rs = await getTriageForRoot(scan.root);
+			const m = new Map<string, typeof rs[number]>();
 			for (const r of rs) m.set(r.finding_id, r);
-			triageById = m;
+			triage.triageById = m;
 		} catch (e) {
 			console.error('getTriageForRoot failed', e);
 		}
 	}
 
 	async function reloadAppliedForCurrentRoot() {
-		if (!root) return;
+		if (!scan.root) return;
 		try {
-			const rs = await getAppliedForRoot(root);
+			const rs = await getAppliedForRoot(scan.root);
 			const s = new Set<string>();
 			for (const r of rs) s.add(r.finding_id);
-			appliedPatchIds = s;
+			triage.appliedPatchIds = s;
 		} catch (e) {
 			console.error('getAppliedForRoot failed', e);
 		}
@@ -444,75 +341,69 @@
 
 	function openProjectFresh(path: string) {
 		resetWorkspace();
-		root = path;
-		view = 'workspace';
+		scan.root = path;
+		ui.view = 'workspace';
 	}
 
 	async function openProjectPast(group: ScanGroup) {
 		resetWorkspace();
-		root = group.root;
-		view = 'workspace';
+		scan.root = group.root;
+		ui.view = 'workspace';
 		try {
 			const r = await loadScan(group.latest_scan_id);
 			hydrateFromScanResult(r);
 			await reloadTriageForCurrentRoot();
 			await reloadAppliedForCurrentRoot();
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			scan.error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
 	function hydrateFromScanResult(r: ScanResult) {
-		walk = r.ingest;
-		triaged = r.triaged;
+		scan.walk = r.ingest;
+		scan.triaged = r.triaged;
 		const fbf = new Map<string, Finding[]>();
 		for (const ff of r.findings_by_file) fbf.set(ff.rel_path, ff.findings);
-		findingsByFile = fbf;
+		scan.findingsByFile = fbf;
 		const errs = new Map<string, string>();
 		for (const e of r.detect_errors ?? []) errs.set(e.rel_path, e.error);
-		detectErrors = errs;
-		const vbi = new Map<string, Verdict | null>();
+		scan.detectErrors = errs;
+		const vbi = new Map<string, typeof r.verified[number]['verdict']>();
 		for (const v of r.verified) vbi.set(v.finding.id, v.verdict ?? null);
-		verdictById = vbi;
+		scan.verdictById = vbi;
 		const pbi = new Map<string, Patch>();
 		for (const p of r.patches) pbi.set(p.finding_id, p);
-		patchById = pbi;
-		usage = r.usage;
-		durations = r.durations ?? EMPTY_STAGE_DURATIONS;
-		rateLimitNotice = null;
-		scanResult = r;
-		resultRoot = r.root;
-		stage = r.status === 'cancelled' ? 'cancelled' : 'done';
+		scan.patchById = pbi;
+		scan.usage = r.usage;
+		scan.durations = r.durations ?? EMPTY_STAGE_DURATIONS;
+		scan.rateLimitNotice = null;
+		scan.scanResult = r;
+		scan.resultRoot = r.root;
+		scan.stage = r.status === 'cancelled' ? 'cancelled' : 'done';
 	}
 
 	function backToLauncher() {
-		view = 'launcher';
+		ui.view = 'launcher';
 	}
-
-	/** True while a "Retry all" sweep is in progress. Disables the button so
-	 *  it can't be double-fired, and lets the summary show a sweep-wide
-	 *  spinner. Per-file spinners (`retryingFiles`) still mark which one is
-	 *  currently in flight. */
-	let retryingAll = $state(false);
 
 	/** Re-run detect on every errored file sequentially. Sequential is the
 	 *  conservative choice — a fan-out would risk hitting the per-minute
 	 *  rate limit on the detect model since we're outside the orchestrator's
 	 *  retry decorator here. */
 	async function retryAllDetectErrors() {
-		if (retryingAll) return;
-		retryingAll = true;
+		if (scan.retryingAll) return;
+		scan.retryingAll = true;
 		try {
-			const rels = Array.from(detectErrors.keys());
+			const rels = Array.from(scan.detectErrors.keys());
 			for (const rel of rels) {
 				// Re-check the live map — a successful retry of an earlier file
 				// drops its entry, but if a new error came in we shouldn't skip
 				// retried ones either. Iterate the snapshot.
-				if (!detectErrors.has(rel)) continue;
+				if (!scan.detectErrors.has(rel)) continue;
 				await retryDetectForFile(rel);
 			}
 		} finally {
-			retryingAll = false;
+			scan.retryingAll = false;
 		}
 	}
 
@@ -521,40 +412,40 @@
 	 *  verify/patch. If the user wants verdicts on the retried file, they'll
 	 *  need a full re-scan. */
 	async function retryDetectForFile(rel: string) {
-		if (!root) return;
-		if (retryingFiles.has(rel)) return;
-		const candidate = walk?.candidates.find((c) => c.rel_path === rel);
-		const absolutePath = candidate?.path ?? `${root}/${rel}`;
-		const next = new Set(retryingFiles);
+		if (!scan.root) return;
+		if (scan.retryingFiles.has(rel)) return;
+		const candidate = scan.walk?.candidates.find((c) => c.rel_path === rel);
+		const absolutePath = candidate?.path ?? `${scan.root}/${rel}`;
+		const next = new Set(scan.retryingFiles);
 		next.add(rel);
-		retryingFiles = next;
+		scan.retryingFiles = next;
 		try {
-			const findings = await scanFile(absolutePath, root);
-			const fbf = new Map(findingsByFile);
+			const findings = await scanFile(absolutePath, scan.root);
+			const fbf = new Map(scan.findingsByFile);
 			fbf.set(rel, findings);
-			findingsByFile = fbf;
-			const errs = new Map(detectErrors);
+			scan.findingsByFile = fbf;
+			const errs = new Map(scan.detectErrors);
 			errs.delete(rel);
-			detectErrors = errs;
+			scan.detectErrors = errs;
 		} catch (e) {
-			const errs = new Map(detectErrors);
+			const errs = new Map(scan.detectErrors);
 			errs.set(rel, e instanceof Error ? e.message : String(e));
-			detectErrors = errs;
+			scan.detectErrors = errs;
 		} finally {
-			const after = new Set(retryingFiles);
+			const after = new Set(scan.retryingFiles);
 			after.delete(rel);
-			retryingFiles = after;
+			scan.retryingFiles = after;
 		}
 	}
 
 	async function refreshKeyState() {
-		keyConfigured = await hasAnthropicKey();
+		scan.keyConfigured = await hasAnthropicKey();
 	}
 
 	// ---------- derived --------------------------------------------------
 	let allFindings = $derived.by(() => {
 		const out: { rel: string; f: Finding }[] = [];
-		for (const [rel, fs] of findingsByFile) {
+		for (const [rel, fs] of scan.findingsByFile) {
 			for (const f of fs) out.push({ rel, f });
 		}
 		out.sort((a, b) => severityRank(a.f.severity) - severityRank(b.f.severity));
@@ -563,11 +454,11 @@
 
 	let visibleFindings = $derived.by(() => {
 		let xs = allFindings;
-		if (selectedFile) xs = xs.filter((x) => x.rel === selectedFile);
-		if (hideDismissed) {
-			xs = xs.filter((x) => triageById.get(x.f.id)?.status !== 'dismissed');
+		if (ui.selectedFile) xs = xs.filter((x) => x.rel === ui.selectedFile);
+		if (ui.hideDismissed) {
+			xs = xs.filter((x) => triage.triageById.get(x.f.id)?.status !== 'dismissed');
 		}
-		const q = filter.trim().toLowerCase();
+		const q = ui.filter.trim().toLowerCase();
 		if (q) {
 			xs = xs.filter(
 				(x) =>
@@ -577,64 +468,69 @@
 					x.f.description.toLowerCase().includes(q)
 			);
 		}
-		return applyFindingsFilter(xs, filterConfig, statusInputs);
+		return applyFindingsFilter(xs, ui.filterConfig, statusInputs);
 	});
 
 	let dismissedCount = $derived.by(() => {
 		let n = 0;
-		for (const t of triageById.values()) if (t.status === 'dismissed') n++;
+		for (const t of triage.triageById.values()) if (t.status === 'dismissed') n++;
 		return n;
 	});
 
 	let selectedFinding = $derived.by(() => {
-		if (!selectedFindingId) return null;
-		return allFindings.find((x) => x.f.id === selectedFindingId)?.f ?? null;
+		if (!ui.selectedFindingId) return null;
+		return allFindings.find((x) => x.f.id === ui.selectedFindingId)?.f ?? null;
 	});
 
 	let selectedVerdict = $derived.by(() => {
 		if (!selectedFinding) return null;
-		return verdictById.get(selectedFinding.id) ?? null;
+		return scan.verdictById.get(selectedFinding.id) ?? null;
 	});
 
 	let selectedPatch = $derived.by(() => {
 		if (!selectedFinding) return null;
-		return patchById.get(selectedFinding.id) ?? null;
+		return scan.patchById.get(selectedFinding.id) ?? null;
 	});
 
 	// ---------- file tree ------------------------------------------------
-	let expandedFolders = $state<Set<string>>(new Set());
-
 	function toggleFolder(p: string) {
-		const next = new Set(expandedFolders);
+		const next = new Set(ui.expandedFolders);
 		if (next.has(p)) next.delete(p);
 		else next.add(p);
-		expandedFolders = next;
+		ui.expandedFolders = next;
 	}
 
 	let fileTree = $derived.by(() =>
-		nestFiles(buildFileNodes({ walk, triaged, findingsByFile, detectErrors }))
+		nestFiles(
+			buildFileNodes({
+				walk: scan.walk,
+				triaged: scan.triaged,
+				findingsByFile: scan.findingsByFile,
+				detectErrors: scan.detectErrors
+			})
+		)
 	);
 
 	// Evict stale folder paths after a re-scan.
 	$effect(() => {
-		if (scanning) return;
+		if (scan.scanning) return;
 		const alive = collectFolderPaths(fileTree);
 		let changed = false;
 		const next = new Set<string>();
-		for (const p of expandedFolders) {
+		for (const p of ui.expandedFolders) {
 			if (alive.has(p)) next.add(p);
 			else changed = true;
 		}
-		if (changed) expandedFolders = next;
+		if (changed) ui.expandedFolders = next;
 	});
 
-	let visibleTree = $derived.by(() => flattenTree(fileTree, expandedFolders));
+	let visibleTree = $derived.by(() => flattenTree(fileTree, ui.expandedFolders));
 	let totalFileNodes = $derived.by(() => countFileNodes(fileTree));
 	let selectedFileNode = $derived.by(() =>
-		selectedFile ? findFileNode(fileTree, selectedFile) : null
+		ui.selectedFile ? findFileNode(fileTree, ui.selectedFile) : null
 	);
 
-	let currentStageIndex = $derived(stageIndex(stage));
+	let currentStageIndex = $derived(stageIndex(scan.stage));
 
 	// ---------- summary totals ------------------------------------------
 	let totals = $derived.by(() => {
@@ -659,25 +555,27 @@
 	});
 
 	let totalTokens = $derived(
-		usage.total.input_tokens + usage.total.output_tokens + usage.total.cache_read_input_tokens
+		scan.usage.total.input_tokens +
+			scan.usage.total.output_tokens +
+			scan.usage.total.cache_read_input_tokens
 	);
 
 	let usageRows = $derived.by(() => [
-		{ name: 'triage', u: usage.triage, ms: durations.triage_ms },
-		{ name: 'detect', u: usage.detect, ms: durations.detect_ms },
-		{ name: 'verify', u: usage.verify, ms: durations.verify_ms },
-		{ name: 'patch', u: usage.patch, ms: durations.patch_ms }
+		{ name: 'triage', u: scan.usage.triage, ms: scan.durations.triage_ms },
+		{ name: 'detect', u: scan.usage.detect, ms: scan.durations.detect_ms },
+		{ name: 'verify', u: scan.usage.verify, ms: scan.durations.verify_ms },
+		{ name: 'patch', u: scan.usage.patch, ms: scan.durations.patch_ms }
 	]);
 
 	// ---------- triage actions ------------------------------------------
 	async function applyTriage(findingId: string, status: TriageStatus, reason?: string) {
-		if (!root) return;
-		triageBusy = true;
+		if (!scan.root) return;
+		triage.triageBusy = true;
 		try {
 			const snoozeUntil =
 				status === 'snoozed' ? Date.now() + SNOOZE_DAYS * 24 * 60 * 60 * 1000 : undefined;
-			await setTriage(findingId, root, status, reason, snoozeUntil);
-			const m = new Map(triageById);
+			await setTriage(findingId, scan.root, status, reason, snoozeUntil);
+			const m = new Map(triage.triageById);
 			m.set(findingId, {
 				finding_id: findingId,
 				status,
@@ -685,54 +583,54 @@
 				snooze_until: snoozeUntil ?? null,
 				updated_at: Date.now()
 			});
-			triageById = m;
+			triage.triageById = m;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			scan.error = e instanceof Error ? e.message : String(e);
 		} finally {
-			triageBusy = false;
+			triage.triageBusy = false;
 		}
 	}
 
 	async function clearTriageFor(findingId: string) {
-		if (!root) return;
-		triageBusy = true;
+		if (!scan.root) return;
+		triage.triageBusy = true;
 		try {
-			await clearTriage(findingId, root);
-			const m = new Map(triageById);
+			await clearTriage(findingId, scan.root);
+			const m = new Map(triage.triageById);
 			m.delete(findingId);
-			triageById = m;
+			triage.triageById = m;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			scan.error = e instanceof Error ? e.message : String(e);
 		} finally {
-			triageBusy = false;
+			triage.triageBusy = false;
 		}
 	}
 
 	function startDismiss(findingId: string) {
-		dismissDraftFor = findingId;
-		dismissReason = triageById.get(findingId)?.reason ?? '';
+		triage.dismissDraftFor = findingId;
+		triage.dismissReason = triage.triageById.get(findingId)?.reason ?? '';
 	}
 
 	function cancelDismiss() {
-		dismissDraftFor = null;
-		dismissReason = '';
+		triage.dismissDraftFor = null;
+		triage.dismissReason = '';
 	}
 
 	async function submitDismiss(findingId: string) {
-		const r = dismissReason.trim();
+		const r = triage.dismissReason.trim();
 		if (!r) return;
 		await applyTriage(findingId, 'dismissed', r);
-		dismissDraftFor = null;
-		dismissReason = '';
+		triage.dismissDraftFor = null;
+		triage.dismissReason = '';
 	}
 
 	function selectFile(rel: string | null) {
-		selectedFile = rel;
-		selectedFindingId = null;
+		ui.selectedFile = rel;
+		ui.selectedFindingId = null;
 	}
 
 	function selectFinding(id: string) {
-		selectedFindingId = id;
+		ui.selectedFindingId = id;
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -742,18 +640,18 @@
 		if (xs.length === 0) return;
 		if (e.key === 'ArrowDown' || e.key === 'j') {
 			e.preventDefault();
-			const idx = xs.findIndex((x) => x.f.id === selectedFindingId);
+			const idx = xs.findIndex((x) => x.f.id === ui.selectedFindingId);
 			const next = idx < 0 ? 0 : Math.min(idx + 1, xs.length - 1);
-			selectedFindingId = xs[next].f.id;
-			scrollFindingIntoView(selectedFindingId);
+			ui.selectedFindingId = xs[next].f.id;
+			scrollFindingIntoView(ui.selectedFindingId);
 		} else if (e.key === 'ArrowUp' || e.key === 'k') {
 			e.preventDefault();
-			const idx = xs.findIndex((x) => x.f.id === selectedFindingId);
+			const idx = xs.findIndex((x) => x.f.id === ui.selectedFindingId);
 			const prev = idx < 0 ? xs.length - 1 : Math.max(idx - 1, 0);
-			selectedFindingId = xs[prev].f.id;
-			scrollFindingIntoView(selectedFindingId);
+			ui.selectedFindingId = xs[prev].f.id;
+			scrollFindingIntoView(ui.selectedFindingId);
 		} else if (e.key === 'Escape') {
-			selectedFindingId = null;
+			ui.selectedFindingId = null;
 		}
 	}
 
@@ -766,9 +664,9 @@
 
 	// Reset per-finding action errors when the user moves to a different finding.
 	$effect(() => {
-		void selectedFindingId;
-		applyError = null;
-		regenError = null;
+		void ui.selectedFindingId;
+		triage.applyError = null;
+		triage.regenError = null;
 	});
 
 	/** Shiki-highlighted HTML for the selected patch diff. */
@@ -828,11 +726,11 @@
 		};
 	});
 
-	let humanizedError = $derived(error ? humanizeError(error) : null);
+	let humanizedError = $derived(scan.error ? humanizeError(scan.error) : null);
 	let showProgress = $derived(
-		scanning || !!scanResult || stage === 'done' || stage === 'cancelled'
+		scan.scanning || !!scan.scanResult || scan.stage === 'done' || scan.stage === 'cancelled'
 	);
-	let showOnboarding = $derived(!scanResult && !scanning && stage === 'idle');
+	let showOnboarding = $derived(!scan.scanResult && !scan.scanning && scan.stage === 'idle');
 	let selectedFileNodeIsStatus = $derived(
 		!!selectedFileNode &&
 			(selectedFileNode.status === 'pre_triage_skipped' ||
@@ -847,208 +745,63 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if view === 'launcher'}
+{#if ui.view === 'launcher'}
 	<Launcher onOpenFresh={openProjectFresh} onOpenPast={openProjectPast} />
 {:else}
-	<div class="flex h-screen flex-col">
-		<WorkspaceTopBar
-			{root}
-			{scanning}
-			{cancelling}
-			{keyConfigured}
-			{scanResult}
-			{resultRoot}
-			{stage}
-			onBack={backToLauncher}
-			onScan={runScan}
-			onCancel={requestCancel}
-			onOpenSettings={() => (settingsOpen = true)}
-			onExportMarkdown={() => exportTo('markdown')}
-			onExportSarif={() => exportTo('sarif')}
-		/>
-
-		{#if !keyConfigured}
-			<ApiKeyPrompt variant="strip" onSaved={refreshKeyState} />
-		{/if}
-
-		{#if humanizedError}
-			<div class="border-b border-destructive/40 bg-destructive/5 px-4 py-2 text-xs">
-				<div class="flex items-baseline gap-2">
-					<span class="font-medium text-destructive">{humanizedError.title}</span>
-					{#if humanizedError.detail}
-						<span class="text-destructive/80">— {humanizedError.detail}</span>
-					{/if}
-				</div>
-			</div>
-		{/if}
-
-		{#if showProgress}
-			<PipelineProgress stageIndex={currentStageIndex} {stage} {rateLimitNotice} {durations} />
-		{/if}
-
-		{#if showOnboarding}
-			<OnboardingPanel {root} {keyConfigured} onScan={runScan} />
-		{:else}
-			<div
-				class="grid flex-1 grid-cols-[260px_minmax(320px,1fr)_minmax(400px,1.4fr)] overflow-hidden"
-			>
-				<FileTree
-					{visibleTree}
-					{totalFileNodes}
-					totalFindings={totals.open +
-						totals.patched +
-						totals.accepted +
-						totals.snoozed +
-						totals.dismissed +
-						totals.dropped +
-						totals.pending +
-						totals.verifying}
-					{selectedFile}
-					{scanning}
-					{stage}
-					hasWalk={!!walk}
-					walkCandidateCount={walk?.candidates.length ?? 0}
-					hasTriaged={triaged.length > 0}
-					{expandedFolders}
-					onSelectFile={selectFile}
-					onToggleFolder={toggleFolder}
-				/>
-
-				<FindingsList
-					{visibleFindings}
-					allFindingsCount={allFindings.length}
-					bind:filter
-					bind:hideDismissed
-					{dismissedCount}
-					bind:filterConfig
-					{selectedFindingId}
-					{selectedFile}
-					{selectedFileNode}
-					{scanning}
-					{stage}
-					hasWalk={!!walk}
-					walkCandidateCount={walk?.candidates.length ?? 0}
-					{detectErrors}
-					{statusInputs}
-					onSelectFinding={selectFinding}
-					onSelectFile={selectFile}
-				/>
-
-				<section class="flex flex-col overflow-hidden">
-					<div class="flex h-10 items-center justify-between border-b border-border px-3">
-						<span class="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-							{selectedFinding
-								? 'Finding detail'
-								: selectedFileNodeIsStatus
-									? 'File status'
-									: 'Summary'}
-						</span>
-						{#if selectedFinding || selectedFileNodeIsStatus}
-							<button
-								type="button"
-								class="inline-flex h-6 items-center gap-1 rounded px-2 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-								title="Back to summary (Esc)"
-								aria-label="Back to summary"
-								onclick={() => {
-									selectedFindingId = null;
-									if (selectedFileNodeIsStatus) selectFile(null);
-								}}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="10"
-									height="10"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2.5"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M18 6 6 18" />
-									<path d="m6 6 12 12" />
-								</svg>
-								<span>Summary</span>
-							</button>
-						{/if}
-					</div>
-					<div class="flex-1 overflow-y-auto">
-						{#if selectedFinding}
-							<FindingDetail
-								finding={selectedFinding}
-								verdict={selectedVerdict}
-								hasVerdictKey={verdictById.has(selectedFinding.id)}
-								patch={selectedPatch}
-								patchVariants={selectedPatchVariants}
-								patchVariantIdx={selectedPatchVariantIdx}
-								triageRecord={triageById.get(selectedFinding.id) ?? null}
-								applied={appliedPatchIds.has(selectedFinding.id)}
-								dismissDraftActive={dismissDraftFor === selectedFinding.id}
-								bind:dismissReason
-								{triageBusy}
-								{applyBusy}
-								{applyError}
-								{regenBusy}
-								{regenError}
-								{excerpt}
-								{excerptHtml}
-								{excerptError}
-								{diffHtml}
-								{scanning}
-								{statusInputs}
-								snoozeDays={SNOOZE_DAYS}
-								onApplyTriage={(status, reason) => {
-									if (selectedFinding) applyTriage(selectedFinding.id, status, reason);
-								}}
-								onClearTriage={() => {
-									if (selectedFinding) clearTriageFor(selectedFinding.id);
-								}}
-								onStartDismiss={() => {
-									if (selectedFinding) startDismiss(selectedFinding.id);
-								}}
-								onCancelDismiss={cancelDismiss}
-								onSubmitDismiss={() => {
-									if (selectedFinding) submitDismiss(selectedFinding.id);
-								}}
-								onApplyPatch={applySelectedPatch}
-								onRegenerate={regenerateAlternative}
-								onSelectVariant={selectPatchVariant}
-							/>
-						{:else if selectedFileNode && selectedFileNodeIsStatus}
-							<FileStatusDetail node={selectedFileNode} />
-						{:else}
-							<ScanSummary
-								{scanResult}
-								{scanning}
-								{stage}
-								{keyConfigured}
-								{root}
-								{walk}
-								patchCount={patchById.size}
-								allFindingsTotal={allFindings.length}
-								{severityCounts}
-								{totals}
-								{durations}
-								{usage}
-								{usageRows}
-								{totalTokens}
-								{totalFileNodes}
-								{detectErrors}
-								{retryingFiles}
-								{retryingAll}
-								onRunScan={runScan}
-								onSelectFile={selectFile}
-								onRetryDetect={retryDetectForFile}
-								onRetryAll={retryAllDetectErrors}
-							/>
-						{/if}
-					</div>
-				</section>
-			</div>
-		{/if}
-	</div>
+	<WorkspaceView
+		{statusInputs}
+		{humanizedError}
+		{showProgress}
+		{currentStageIndex}
+		{showOnboarding}
+		{visibleTree}
+		{totalFileNodes}
+		{totals}
+		{visibleFindings}
+		{allFindings}
+		{dismissedCount}
+		{selectedFileNode}
+		{selectedFinding}
+		{selectedFileNodeIsStatus}
+		{selectedVerdict}
+		{selectedPatch}
+		{selectedPatchVariants}
+		{selectedPatchVariantIdx}
+		{excerpt}
+		{excerptHtml}
+		{excerptError}
+		{diffHtml}
+		{severityCounts}
+		{usageRows}
+		{totalTokens}
+		snoozeDays={SNOOZE_DAYS}
+		onBack={backToLauncher}
+		onScan={runScan}
+		onCancel={requestCancel}
+		onOpenSettings={() => (ui.settingsOpen = true)}
+		onExportMarkdown={() => exportTo('markdown')}
+		onExportSarif={() => exportTo('sarif')}
+		onRefreshKeyState={refreshKeyState}
+		onSelectFile={selectFile}
+		onSelectFinding={selectFinding}
+		onToggleFolder={toggleFolder}
+		onApplyTriage={applyTriage}
+		onClearTriage={clearTriageFor}
+		onStartDismiss={startDismiss}
+		onCancelDismiss={cancelDismiss}
+		onSubmitDismiss={submitDismiss}
+		onApplyPatch={applySelectedPatch}
+		onRegenerate={regenerateAlternative}
+		onSelectVariant={selectPatchVariant}
+		onRetryDetect={retryDetectForFile}
+		onRetryAll={retryAllDetectErrors}
+		onClearSelection={() => {
+			ui.selectedFindingId = null;
+			if (selectedFileNodeIsStatus) selectFile(null);
+		}}
+	/>
 {/if}
 
-{#if settingsOpen}
-	<Settings onClose={() => (settingsOpen = false)} />
+{#if ui.settingsOpen}
+	<Settings onClose={() => (ui.settingsOpen = false)} />
 {/if}

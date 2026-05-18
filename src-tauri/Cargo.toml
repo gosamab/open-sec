@@ -28,7 +28,6 @@ dotenvy = "0.15.7"
 ignore = "0.4.25"
 diffy = "0.4.2"
 sha2 = "0.10.9"
-keyring = "3.6.3"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

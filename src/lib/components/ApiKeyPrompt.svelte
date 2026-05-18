@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import { hasAnthropicKey, setAnthropicKey, openUrl } from '$lib/ipc';
+	import { setAnthropicKey, openUrl } from '$lib/ipc';
 
 	interface Props {
 		variant?: 'card' | 'strip';
@@ -34,19 +34,16 @@
 		saving = true;
 		errorMsg = null;
 		try {
+			// Backend writes + verifies in one IPC; on success the key is
+			// definitely retrievable. No separate hasAnthropicKey readback.
 			await setAnthropicKey(trimmed);
-			const ok = await hasAnthropicKey();
-			if (!ok) {
-				errorMsg = 'Saved, but the OS keychain did not return the key on read-back.';
-				return;
-			}
 			keyInput = '';
 			savedFlash = true;
 			setTimeout(() => (savedFlash = false), 1600);
 			onSaved?.();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			errorMsg = `Could not save: ${msg}`;
+			errorMsg = msg || 'Could not save the key. Try again.';
 			console.error('setAnthropicKey failed', err);
 		} finally {
 			saving = false;
@@ -65,23 +62,22 @@
 </script>
 
 {#if variant === 'card'}
-	<div
-		class="space-y-3 rounded-md border border-amber-300/50 bg-amber-50/50 p-4 dark:border-amber-500/30 dark:bg-amber-950/20"
-	>
+	<div class="space-y-3 rounded-md border border-border bg-muted/30 p-4">
 		<div class="space-y-1">
-			<p class="text-sm font-medium">Connect your Anthropic API key to get started</p>
+			<p class="text-sm font-medium leading-tight">Connect your Anthropic API key to get started</p>
 			<p class="text-xs leading-relaxed text-muted-foreground">
-				Open Security uses Claude to scan your code. Your key is stored locally in the macOS
-				keychain and only ever sent to Anthropic.
+				Open Security uses Claude to scan your code. Your key is saved locally in
+				the app's data folder and only sent to Anthropic.
 				<button
 					type="button"
-					class="text-primary underline-offset-2 hover:underline"
+					class="text-foreground underline underline-offset-2 hover:text-primary"
 					onclick={openConsole}
 				>
-					Get a key from console.anthropic.com →
+					Get a key →
 				</button>
 			</p>
 		</div>
+
 		<form class="flex gap-2" onsubmit={save}>
 			<Input
 				bind:ref={inputEl}
@@ -92,10 +88,9 @@
 				autocomplete="off"
 				spellcheck="false"
 				aria-label="Anthropic API key"
-				aria-invalid={errorMsg ? 'true' : undefined}
 				class="h-8 font-mono text-xs"
 			/>
-			<Button type="submit" size="sm" disabled={saving || !keyInput.trim()}>
+			<Button type="submit" disabled={saving || !keyInput.trim()}>
 				{#if saving}
 					Saving…
 				{:else if savedFlash}
@@ -105,12 +100,13 @@
 				{/if}
 			</Button>
 		</form>
+
 		{#if errorMsg}
-			<p class="text-xs text-destructive" role="alert">{errorMsg}</p>
+			<p class="text-xs leading-relaxed text-destructive" role="alert">{errorMsg}</p>
 		{/if}
 	</div>
 {:else}
-	<div class="border-b border-border bg-amber-50/40 px-4 py-3 dark:bg-amber-950/20">
+	<div class="border-b border-border bg-muted/40 px-4 py-3">
 		<form class="flex flex-wrap items-center gap-2" onsubmit={save}>
 			<span class="text-sm font-medium">Anthropic API key required</span>
 			<Input
@@ -129,7 +125,7 @@
 				{:else if savedFlash}
 					Saved ✓
 				{:else}
-					Save to keychain
+					Save key
 				{/if}
 			</Button>
 			<button

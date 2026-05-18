@@ -78,7 +78,8 @@ jobs:
 
             1. Download the `.dmg` for your chip — Apple Silicon → `*_aarch64.dmg`, Intel → `*_x64.dmg`.
             2. Open the `.dmg` and drag **Open Security** to Applications.
-            3. If macOS says _"Apple cannot check this app"_ on first launch, right-click the app → **Open** → **Open** (this build is currently unsigned).
+
+            Builds are signed by Developer ID and notarized by Apple — first launch should be clean, no Gatekeeper warning.
 
             ## What's new
 

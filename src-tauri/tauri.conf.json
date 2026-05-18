@@ -1,7 +1,7 @@
 {
 	"$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
 	"productName": "Open Security",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"identifier": "com.oazab.open-sec",
 	"build": {
 		"frontendDist": "../build",
@@ -43,7 +43,7 @@
 			"minimumSystemVersion": "11.0",
 			"hardenedRuntime": true,
 			"entitlements": "entitlements.plist",
-			"signingIdentity": null,
+			"signingIdentity": "Developer ID Application: Osama Azab (393RM7T49G)",
 			"providerShortName": null
 		},
 		"android": {

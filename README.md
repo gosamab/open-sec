@@ -1,8 +1,14 @@
 # Open Security
 
-**Version 0.1.0** · package: `open-sec` · bundle: `com.oazab.open-sec`
+**Version 1.0.0** · package: `open-sec` · bundle: `com.oazab.open-sec`
 
 AI-powered security code scanner. A desktop app that scans a folder, finds vulnerabilities, and proposes patches — using the Anthropic API.
+
+## Install
+
+Download the latest `.dmg` from [Releases](https://github.com/gosamab/open-sec/releases/latest) — Apple Silicon → `*_aarch64.dmg`, Intel → `*_x64.dmg`. Open the `.dmg` and drag **Open Security** to Applications.
+
+First launch on an unsigned build: right-click the app → **Open** → **Open** to bypass Gatekeeper.
 
 ## Pipeline
 
@@ -17,30 +23,31 @@ ingest  →  triage  →  detect  →  verify  →  patch
 - **Verify** — adversarially re-examines each finding and returns a concrete exploit. Unreachable findings are dropped.
 - **Patch** — proposes a minimal `old_block` → `new_block` fix and renders a unified diff.
 
-Results persist to SQLite at `<app_data_dir>/open-sec.db`. Re-scanning the same folder reuses your accept/dismiss/snooze decisions.
+Results persist to SQLite at `<app_data_dir>/open-sec.db`. Re-scanning the same folder reuses your accept/dismiss/snooze decisions. Interrupted scans (cancel, crash, quit) can be resumed — finished stages are reused, only the missing work is re-run.
 
 ## Requirements
 
-- macOS (Windows planned)
-- Anthropic API key (stored in the OS keychain)
+- macOS 11 or later (Apple Silicon or Intel). Windows / Linux planned.
+- Anthropic API key (stored in the macOS Keychain).
 
-## Build
+## Usage
+
+1. Launch Open Security and paste your Anthropic API key.
+2. Pick **+ New project** to scan a folder, or reopen a **Recent project**.
+3. Browse findings in the workspace: file tree, findings list, and detail pane with diff and exploit.
+4. **Open in editor** to jump to a finding in your default editor, or apply a patch in place.
+5. **Export ▾** for Markdown, PDF, or SARIF v2.1.0.
+
+## Build from source
 
 ```sh
-git clone <repo>
+git clone https://github.com/gosamab/open-sec.git
 cd open-sec
 bun install
 bun run tauri build
 ```
 
-The `.app` and `.dmg` land in `src-tauri/target/release/bundle/`. Drag to Applications.
-
-## Usage
-
-1. Launch open-sec and paste your Anthropic API key.
-2. Pick **+ New project** to scan a folder, or reopen a **Recent project**.
-3. Browse findings in the workspace: file tree, findings list, and detail pane with diff and exploit.
-4. **Export ▾** for Markdown, PDF, or SARIF v2.1.0.
+The `.app` and `.dmg` land in `src-tauri/target/release/bundle/`.
 
 ## Develop
 

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger for testing the workflow without cutting a tag.
+  workflow_dispatch:
+
+# Required so tauri-action can create the GitHub Release and upload assets.
+permissions:
+  contents: write
 
 # Cancel in-flight runs for the same tag (rare, but harmless to set).
 concurrency:
@@ -49,26 +55,61 @@ jobs:
       - name: Build, sign, notarize, and upload
         uses: tauri-apps/tauri-action@v0
         env:
-          # Apple code-signing identity. APPLE_CERTIFICATE is the base64 of a
-          # .p12 export of your Developer ID Application cert; tauri-action
-          # imports it into a temporary keychain for the duration of the job.
+          # Apple code-signing + notarization. All optional — if any of these
+          # secrets is unset, tauri-action skips signing and produces an
+          # unsigned .app/.dmg. Users will see a Gatekeeper warning on first
+          # launch; right-click → Open works around it.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-
-          # Apple notarization. APPLE_PASSWORD is an app-specific password.
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Creates the GitHub Release the first job to run; subsequent
-          # matrix jobs append their artifacts to the same release.
+          # Starts as a draft so the release is only published once *both*
+          # matrix jobs have uploaded their .dmg. Otherwise the first job to
+          # finish would publish a half-empty release.
           tagName: ${{ github.ref_name }}
           releaseName: "Open Security ${{ github.ref_name }}"
           releaseBody: |
-            **macOS:** download the matching `.dmg` for your chip (Apple Silicon → `aarch64`, Intel → `x86_64`), drag to Applications.
-          releaseDraft: false
+            ## Install (macOS)
+
+            1. Download the `.dmg` for your chip — Apple Silicon → `*_aarch64.dmg`, Intel → `*_x64.dmg`.
+            2. Open the `.dmg` and drag **Open Security** to Applications.
+            3. If macOS says _"Apple cannot check this app"_ on first launch, right-click the app → **Open** → **Open** (this build is currently unsigned).
+
+            ## What's new
+
+            See [CHANGELOG.md](https://github.com/gosamab/open-sec/blob/${{ github.ref_name }}/CHANGELOG.md).
+          releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.platform.target }}
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const draft = releases.find(r => r.tag_name === tag && r.draft);
+            if (!draft) {
+              core.info(`No draft release for ${tag} — nothing to publish.`);
+              return;
+            }
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: draft.id,
+              draft: false,
+            });
+            core.info(`Published release ${tag}.`);

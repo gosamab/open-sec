@@ -1,7 +1,7 @@
 [package]
 name = "open-sec"
 version = "0.1.0"
-description = "Local-first security code scanner powered by LLMs"
+description = "AI-powered security code scanner"
 authors = ["open-sec contributors"]
 license = "MIT"
 repository = ""
@@ -19,9 +19,7 @@ tauri-build = { version = "2.6.1", features = [] }
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
 tauri = { version = "2.11.1", features = [] }
-tauri-plugin-log = "2"
 tokio = { version = "1.52.3", features = ["full", "tracing"] }
 futures = "0.3.32"
 async-trait = "0.1.89"
@@ -37,9 +35,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls"] }
 tauri-plugin-dialog = "2.7.1"
-tauri-plugin-fs = "2.5.1"
-tauri-plugin-updater = "2.9.1"
-tauri-plugin-process = "2.3.1"
 bytes = "1.11.1"
 tree-sitter = "0.26.8"
 tree-sitter-rust = "0.24.2"
@@ -51,9 +46,3 @@ regex = "1.12.3"
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6.5"
-
-# NOTE: calibration CLIs (scan_cli, triage_cli, verify_cli, patch_cli,
-# pipeline_cli) live in src/bin/ and ship inside the .app bundle (Tauri
-# auto-discovers every [[bin]] target). Acceptable bloat for v0.1.0;
-# moving them to a workspace sibling crate would let production builds
-# drop ~8 MB. Tracked as future work.

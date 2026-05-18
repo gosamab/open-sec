@@ -1,6 +1,6 @@
 # open-sec
 
-Local-first security code scanner. Desktop app that walks a folder, triages
+AI-powered security code scanner. Desktop app that walks a folder, triages
 files with Haiku, runs an agentic detection pass with Sonnet, adversarially
 verifies with Opus, and proposes patches — all without sending your code
 anywhere except the Anthropic API.
@@ -37,13 +37,13 @@ your accept/dismiss/snooze decisions via a stable finding ID.
 
 ## Requirements
 
-- macOS or Windows
+- macOS (Windows support is planned)
 - Anthropic API key (stored in the OS keychain; falls back to
   `ANTHROPIC_API_KEY` from `.env` for development)
 
 ## Install
 
-Until binaries are signed and released, build from source:
+Build from source:
 
 ```sh
 git clone <repo>
@@ -55,8 +55,9 @@ bun run tauri build
 The `.app` lands in `src-tauri/target/release/bundle/macos/` and the
 `.dmg` in `src-tauri/target/release/bundle/dmg/`. Drag to Applications.
 
-> **macOS unsigned binary:** the first launch will warn that the
-> developer can't be verified. Right-click → **Open** → confirm.
+> **Unsigned local builds (macOS):** the first launch will warn that the
+> developer can't be verified. Right-click → **Open** → confirm. Signed
+> releases produced by the CI workflow don't trigger this prompt.
 
 ## Usage
 
@@ -75,22 +76,6 @@ The `.app` lands in `src-tauri/target/release/bundle/macos/` and the
      another fix / Triage actions live here.
 4. Topbar **Export ▾** gives you Markdown, PDF, and SARIF v2.1.0 output.
 
-## Calibration CLIs
-
-Each pipeline stage has its own CLI for prompt-tuning without the UI in
-the loop:
-
-```sh
-cd src-tauri
-cargo run --bin triage_cli   -- <dir>
-cargo run --bin scan_cli     -- <file>
-cargo run --bin verify_cli   -- <file>
-cargo run --bin patch_cli    -- <file>
-cargo run --bin pipeline_cli -- <dir>   # full end-to-end
-```
-
-All accept `--json` for raw output and per-stage `--model <id>` flags.
-
 ## Development
 
 ```sh
@@ -98,7 +83,7 @@ bun install
 bun run tauri dev      # launch app with hot reload
 bun run check          # SvelteKit + Svelte typecheck
 cd src-tauri
-cargo test --lib       # 78 unit tests across the pipeline
+cargo test --lib       # unit tests across the pipeline
 cargo check            # Rust typecheck
 ```
 

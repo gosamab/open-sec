@@ -49,12 +49,6 @@ jobs:
       - name: Build, sign, notarize, and upload
         uses: tauri-apps/tauri-action@v0
         env:
-          # Updater signing key (generated once via `bun tauri signer generate`).
-          # The plugin verifies downloaded updates against the matching pubkey
-          # baked into tauri.conf.json.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
           # Apple code-signing identity. APPLE_CERTIFICATE is the base64 of a
           # .p12 export of your Developer ID Application cert; tauri-action
           # imports it into a temporary keychain for the duration of the job.
@@ -74,14 +68,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Open Security ${{ github.ref_name }}"
           releaseBody: |
-            See the [CHANGELOG](./CHANGELOG.md) for what's new.
-
             **macOS:** download the matching `.dmg` for your chip (Apple Silicon → `aarch64`, Intel → `x86_64`), drag to Applications.
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.platform.target }}
-          # Auto-update is disabled for now (see `plugins.updater.active`
-          # in tauri.conf.json). Flip to `true` here + in the conf when you
-          # want CI to emit `latest.json` + signed `.tar.gz` for the
-          # in-app updater.
-          includeUpdaterJson: false

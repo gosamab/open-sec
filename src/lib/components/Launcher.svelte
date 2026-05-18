@@ -170,7 +170,7 @@
 				<h1 class="text-3xl font-semibold tracking-tight">Open Security</h1>
 			</div>
 			<p class="text-muted-foreground text-sm">
-				Local-first security code scanner. Pick a folder to begin.
+				AI-powered security code scanner. Pick a folder to begin.
 			</p>
 		</div>
 

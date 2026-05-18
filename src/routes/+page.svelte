@@ -4,7 +4,6 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Badge } from '$lib/components/ui/badge';
-	import * as Card from '$lib/components/ui/card';
 	import Launcher from '$lib/components/Launcher.svelte';
 	import Settings from '$lib/components/Settings.svelte';
 	import { renderMd, renderInlineMd } from '$lib/markdown';

@@ -149,6 +149,13 @@ pub struct Store {
 }
 
 impl Store {
+    /// Acquire the connection mutex, recovering from a previous thread's
+    /// panic. SQLite operations are transactional so a poisoned lock only
+    /// means a holder panicked, not that data is corrupt.
+    fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Open (or create) the SQLite database at `path` and run any pending
     /// schema migrations.
     pub fn open(path: &Path) -> Result<Self> {
@@ -179,7 +186,7 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.db();
         let current: i32 =
             conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current < 1 {
@@ -205,7 +212,7 @@ impl Store {
         let started_at = now_ms();
         let finished_at = started_at;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.db();
         let tx = conn.transaction()?;
 
         let walk_json = json::to_string(&result.ingest)?;
@@ -306,7 +313,7 @@ impl Store {
 
     /// One row per root, showing the latest scan's metadata.
     pub fn list_scan_groups(&self, limit: usize) -> Result<Vec<ScanGroup>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         let mut stmt = conn.prepare(
             "SELECT s.root,
                     s.id, s.started_at, s.finished_at, s.status,
@@ -337,7 +344,7 @@ impl Store {
     /// Hydrate a `ScanResult` back from the database. Used when the launcher
     /// opens a past scan without re-running.
     pub fn load_scan(&self, scan_id: &str) -> Result<ScanResult> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
 
         let (root, walk_json, triaged_json, usage_json): (String, String, String, String) = conn
             .query_row(
@@ -448,13 +455,13 @@ impl Store {
     }
 
     pub fn delete_scan(&self, scan_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         conn.execute("DELETE FROM scans WHERE id = ?1", params![scan_id])?;
         Ok(())
     }
 
     pub fn delete_scans_for_root(&self, root: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         conn.execute("DELETE FROM scans WHERE root = ?1", params![root])?;
         Ok(())
     }
@@ -471,7 +478,7 @@ impl Store {
         reason: Option<&str>,
         snooze_until: Option<i64>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         conn.execute(
             "INSERT INTO triage (finding_id, root, status, reason, snooze_until, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -493,7 +500,7 @@ impl Store {
     }
 
     pub fn clear_triage(&self, finding_id: &str, root: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         conn.execute(
             "DELETE FROM triage WHERE finding_id = ?1 AND root = ?2",
             params![finding_id, root],
@@ -502,7 +509,7 @@ impl Store {
     }
 
     pub fn record_patch_applied(&self, finding_id: &str, root: &str, file: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         conn.execute(
             "INSERT INTO applied_patches (finding_id, root, file, applied_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -515,7 +522,7 @@ impl Store {
     }
 
     pub fn get_applied_for_root(&self, root: &str) -> Result<Vec<AppliedPatchRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         let mut stmt = conn.prepare(
             "SELECT finding_id, file, applied_at FROM applied_patches WHERE root = ?1",
         )?;
@@ -535,7 +542,7 @@ impl Store {
     /// for the frontend to index by `finding_id` and overlay on findings as
     /// they're rendered.
     pub fn get_triage_for_root(&self, root: &str) -> Result<Vec<TriageRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.db();
         let mut stmt = conn.prepare(
             "SELECT finding_id, status, reason, snooze_until, updated_at
              FROM triage WHERE root = ?1",

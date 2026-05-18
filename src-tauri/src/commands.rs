@@ -29,18 +29,22 @@ pub struct CancelHandle {
 }
 
 impl CancelHandle {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<AtomicBool>>> {
+        self.current.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     pub fn install(&self) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
-        *self.current.lock().unwrap() = Some(flag.clone());
+        *self.lock() = Some(flag.clone());
         flag
     }
 
     pub fn clear(&self) {
-        *self.current.lock().unwrap() = None;
+        *self.lock() = None;
     }
 
     pub fn cancel(&self) -> bool {
-        if let Some(flag) = self.current.lock().unwrap().as_ref() {
+        if let Some(flag) = self.lock().as_ref() {
             flag.store(true, Ordering::SeqCst);
             true
         } else {

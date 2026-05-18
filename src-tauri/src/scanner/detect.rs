@@ -85,62 +85,13 @@ Your FINAL assistant message MUST be the JSON object alone. No tool calls in
 that final message; no prose other than the JSON.
 "#;
 
-fn system_prompt(with_tools: bool) -> String {
-    if with_tools {
-        format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}")
-    } else {
-        BASE_DETECTION_PROMPT.to_string()
-    }
+fn system_prompt() -> String {
+    format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}")
 }
 
 #[derive(Deserialize)]
 struct FindingsEnvelope {
     findings: Vec<Finding>,
-}
-
-#[instrument(skip(provider, source), fields(path = %path.display(), bytes = source.len()))]
-pub async fn scan_single_file(
-    path: &Path,
-    source: &str,
-    provider: &dyn Provider,
-    model: &str,
-) -> Result<Vec<Finding>> {
-    let file_label = path.display().to_string();
-
-    let mut req = GenerationRequest::new(model, DEFAULT_MAX_TOKENS);
-    req.temperature = Some(0.0);
-    req.system.push(
-        SystemBlock::text(system_prompt(false)).with_cache(CacheControl::ephemeral_1h()),
-    );
-    req.messages.push(Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: format!("File: {file_label}\n\n{}", with_line_numbers(source)),
-        }],
-    });
-
-    let resp = provider
-        .generate(req)
-        .await
-        .context("anthropic generate call failed")?;
-
-    let text = collect_text(&resp.content);
-    debug!(chars = text.len(), "received detection response");
-
-    let json = extract_json_object(&text)
-        .ok_or_else(|| anyhow!("model response did not contain a JSON object: {text}"))?;
-
-    let envelope: FindingsEnvelope =
-        serde_json::from_str(json).with_context(|| format!("parsing findings JSON: {json}"))?;
-
-    let mut findings = envelope.findings;
-    for f in &mut findings {
-        // The model is asked to echo the file path, but normalize to the caller's
-        // path so the stable id is computed from a single source of truth.
-        f.file = file_label.clone();
-        f.assign_id();
-    }
-    Ok(findings)
 }
 
 /// Agentic scan: gives the model tool access (read_file, grep, find_references,
@@ -176,7 +127,7 @@ pub async fn scan_with_tools(
         let mut req = GenerationRequest::new(model, DEFAULT_MAX_TOKENS);
         req.temperature = Some(0.0);
         req.system.push(
-            SystemBlock::text(system_prompt(true)).with_cache(CacheControl::ephemeral_1h()),
+            SystemBlock::text(system_prompt()).with_cache(CacheControl::ephemeral_1h()),
         );
         req.tools = tool_defs.clone();
         req.messages = messages.clone();

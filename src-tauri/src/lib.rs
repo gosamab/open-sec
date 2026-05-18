@@ -8,7 +8,18 @@ pub mod store;
 pub mod tools;
 
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tracing_subscriber::EnvFilter;
+
+fn fatal_dialog(app: &tauri::AppHandle, message: String) -> ! {
+    tracing::error!("{message}");
+    app.dialog()
+        .message(message)
+        .title("Open Security")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
+    std::process::exit(1);
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,20 +35,27 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            // Open the scan-history DB at <app_data_dir>/open-sec.db. We crash
-            // here on failure because nothing downstream works without it.
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .expect("resolving app_data_dir");
+            let handle = app.handle().clone();
+            let app_data = match app.path().app_data_dir() {
+                Ok(p) => p,
+                Err(e) => fatal_dialog(
+                    &handle,
+                    format!("Could not resolve the app data directory.\n\n{e:#}"),
+                ),
+            };
             std::fs::create_dir_all(&app_data).ok();
             let db_path = app_data.join("open-sec.db");
-            let store = store::Store::open(&db_path)
-                .unwrap_or_else(|e| panic!("opening store at {}: {e:#}", db_path.display()));
+            let store = match store::Store::open(&db_path) {
+                Ok(s) => s,
+                Err(e) => fatal_dialog(
+                    &handle,
+                    format!(
+                        "Could not open the scan-history database at:\n{}\n\n{e:#}",
+                        db_path.display()
+                    ),
+                ),
+            };
             app.manage(store);
             app.manage(commands::CancelHandle::default());
             Ok(())

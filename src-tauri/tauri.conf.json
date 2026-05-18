@@ -22,22 +22,16 @@
       }
     ],
     "security": {
-      "csp": null
-    }
-  },
-  "plugins": {
-    "updater": {
-      "active": false,
-      "endpoints": [
-        "https://github.com/oazab/open-sec/releases/latest/download/latest.json"
-      ],
-      "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE1RDM4NDc1MjgwQTkyNkMKUldSc2tnb29kWVRUcGM0ZkdLQ0ZrVGRFenRhMzZJbDlnbmM2R1JYUVFDOW1aelpnRnFoaW1LdFIK"
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "shortDescription": "AI-powered security code scanner",
+    "longDescription": "Desktop scanner that finds vulnerabilities in your codebase using LLMs. Pipeline: triage, agentic detection, adversarial verification, and patch proposals.",
+    "category": "DeveloperTool",
+    "copyright": "© 2026 Osama Azab",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

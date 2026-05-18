@@ -10,9 +10,6 @@
     "core:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-close",
-    "dialog:default",
-    "fs:default",
-    "updater:default",
-    "process:default"
+    "dialog:default"
   ]
 }

@@ -28,7 +28,8 @@
 	// Container we use both as the focus-trap root and for "outside click" hit-testing.
 	let dialog = $state<HTMLDivElement | null>(null);
 	// Element that had focus before we opened, so we can restore on close.
-	const opener = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+	const opener =
+		typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
 
 	$effect(() => {
 		if (!dialog) return;
@@ -80,28 +81,28 @@
 	<!-- Backdrop: a real button so click-to-close is keyboard-accessible too. -->
 	<button
 		type="button"
-		class="bg-background/80 absolute inset-0 backdrop-blur-sm"
+		class="absolute inset-0 bg-background/80 backdrop-blur-sm"
 		aria-label="Close settings"
 		tabindex="-1"
 		onclick={onClose}
 	></button>
 	<div
 		bind:this={dialog}
-		class="bg-background border-border relative w-full max-w-2xl space-y-6 rounded-lg border p-6 shadow-xl"
+		class="relative w-full max-w-2xl space-y-6 rounded-lg border border-border bg-background p-6 shadow-xl"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Settings"
 	>
 		<header class="space-y-1">
 			<h2 class="text-lg font-semibold tracking-tight">Settings</h2>
-			<p class="text-muted-foreground text-xs">
+			<p class="text-xs text-muted-foreground">
 				Per-stage model and concurrency overrides. Saved locally; applied on the next scan.
 			</p>
 		</header>
 
 		<!-- Models -->
 		<section class="space-y-3">
-			<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				Models
 			</h3>
 			<div class="grid grid-cols-[100px_1fr] items-center gap-3 text-sm">
@@ -118,12 +119,12 @@
 
 		<!-- Concurrency -->
 		<section class="space-y-3">
-			<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				Concurrency
 			</h3>
 			<div class="grid grid-cols-4 gap-3 text-sm">
 				<div class="space-y-1">
-					<label for="c-triage" class="text-muted-foreground text-xs">Triage</label>
+					<label for="c-triage" class="text-xs text-muted-foreground">Triage</label>
 					<Input
 						id="c-triage"
 						type="number"
@@ -134,7 +135,7 @@
 					/>
 				</div>
 				<div class="space-y-1">
-					<label for="c-detect" class="text-muted-foreground text-xs">Detect</label>
+					<label for="c-detect" class="text-xs text-muted-foreground">Detect</label>
 					<Input
 						id="c-detect"
 						type="number"
@@ -145,7 +146,7 @@
 					/>
 				</div>
 				<div class="space-y-1">
-					<label for="c-verify" class="text-muted-foreground text-xs">Verify</label>
+					<label for="c-verify" class="text-xs text-muted-foreground">Verify</label>
 					<Input
 						id="c-verify"
 						type="number"
@@ -156,7 +157,7 @@
 					/>
 				</div>
 				<div class="space-y-1">
-					<label for="c-patch" class="text-muted-foreground text-xs">Patch</label>
+					<label for="c-patch" class="text-xs text-muted-foreground">Patch</label>
 					<Input
 						id="c-patch"
 						type="number"
@@ -171,7 +172,7 @@
 
 		<!-- Budget -->
 		<section class="space-y-3">
-			<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				Budget cap
 			</h3>
 			<div class="grid grid-cols-[160px_1fr] items-center gap-3 text-sm">
@@ -185,17 +186,18 @@
 						bind:value={draft.budget_total_tokens}
 						class="h-8 text-xs"
 					/>
-					<span class="text-muted-foreground text-xs">0 = unlimited</span>
+					<span class="text-xs text-muted-foreground">0 = unlimited</span>
 				</div>
 			</div>
-			<p class="text-muted-foreground text-xs leading-relaxed">
-				When the running total of input + output tokens crosses this cap, the scan is
-				cancelled at the next stage boundary. Partial findings are preserved and the
-				scan is saved with status <span class="font-mono">cancelled</span>.
+			<p class="text-xs leading-relaxed text-muted-foreground">
+				When the running total of input + output tokens crosses this cap, the scan is cancelled at
+				the next stage boundary. Partial findings are preserved and the scan is saved with status <span
+					class="font-mono">cancelled</span
+				>.
 			</p>
 		</section>
 
-		<footer class="border-border flex items-center justify-between border-t pt-4">
+		<footer class="flex items-center justify-between border-t border-border pt-4">
 			<Button variant="outline" size="sm" onclick={reset}>Reset to defaults</Button>
 			<div class="flex gap-2">
 				<Button variant="outline" size="sm" onclick={onClose}>Cancel</Button>

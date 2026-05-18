@@ -3,14 +3,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { renderInlineMd, renderMd } from '$lib/markdown';
-	import type {
-		Excerpt,
-		Finding,
-		Patch,
-		TriageRecord,
-		TriageStatus,
-		Verdict
-	} from '$lib/ipc';
+	import type { Excerpt, Finding, Patch, TriageRecord, TriageStatus, Verdict } from '$lib/ipc';
 	import { referencesFor } from '$lib/references';
 	import {
 		diffLineClass,
@@ -93,7 +86,7 @@
 	let refs = $derived(referencesFor(finding));
 </script>
 
-<article class="divide-border divide-y">
+<article class="divide-y divide-border">
 	<header class="space-y-2 px-5 py-4">
 		<div class="flex flex-wrap items-center gap-1.5">
 			<Badge class={severityClass(finding.severity)}>{finding.severity}</Badge>
@@ -101,21 +94,21 @@
 				{statusLabelFor(finding, statusInputs)}
 			</Badge>
 			<Badge variant="outline">{finding.kind}</Badge>
-			<span class="text-muted-foreground font-mono text-xs">{finding.cwe}</span>
+			<span class="font-mono text-xs text-muted-foreground">{finding.cwe}</span>
 			{#if finding.owasp}
-				<span class="text-muted-foreground font-mono text-xs">· OWASP {finding.owasp}</span>
+				<span class="font-mono text-xs text-muted-foreground">· OWASP {finding.owasp}</span>
 			{/if}
 		</div>
-		<h2 class="text-base font-semibold leading-snug tracking-tight">{finding.title}</h2>
-		<p class="text-muted-foreground break-all font-mono text-xs">
+		<h2 class="text-base leading-snug font-semibold tracking-tight">{finding.title}</h2>
+		<p class="font-mono text-xs break-all text-muted-foreground">
 			{finding.file}:{finding.line_start}{finding.line_end !== finding.line_start
 				? `-${finding.line_end}`
 				: ''}
 		</p>
 
 		{#if dismissDraftActive}
-			<div class="border-border space-y-2 rounded-md border p-2">
-				<div class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+			<div class="space-y-2 rounded-md border border-border p-2">
+				<div class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					Reason for dismissal
 				</div>
 				<Input
@@ -146,11 +139,7 @@
 						Un-accept
 					</Button>
 				{:else}
-					<Button
-						size="sm"
-						onclick={() => onApplyTriage('accepted')}
-						disabled={triageBusy}
-					>
+					<Button size="sm" onclick={() => onApplyTriage('accepted')} disabled={triageBusy}>
 						Accept
 					</Button>
 				{/if}
@@ -179,7 +168,7 @@
 				{/if}
 			</div>
 			{#if triageRecord?.status === 'dismissed' && triageRecord.reason}
-				<p class="text-muted-foreground pt-1 text-xs italic">
+				<p class="pt-1 text-xs text-muted-foreground italic">
 					Reason: {triageRecord.reason}
 				</p>
 			{/if}
@@ -187,7 +176,7 @@
 	</header>
 
 	<section class="space-y-2 px-5 py-4">
-		<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+		<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 			Description
 		</h3>
 		<div class="md text-sm leading-relaxed">
@@ -197,7 +186,7 @@
 
 	{#if refs.length > 0}
 		<section class="space-y-2 px-5 py-4">
-			<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				References
 			</h3>
 			<div class="flex flex-wrap gap-2">
@@ -207,10 +196,10 @@
 						target="_blank"
 						rel="noopener noreferrer"
 						data-md-link="external"
-						class="border-border hover:border-foreground/40 hover:bg-muted/50 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs no-underline transition-colors"
+						class="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs no-underline transition-colors hover:border-foreground/40 hover:bg-muted/50"
 					>
 						<span class="font-mono">{r.label}</span>
-						<span class="text-muted-foreground text-[0.625rem]">· {r.source}</span>
+						<span class="text-[0.625rem] text-muted-foreground">· {r.source}</span>
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
 							width="10"
@@ -233,11 +222,11 @@
 	{/if}
 
 	<section class="space-y-2 px-5 py-4">
-		<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+		<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 			Data flow
 		</h3>
 		<ol
-			class="marker:text-muted-foreground ml-5 list-decimal space-y-1 text-sm leading-relaxed marker:font-mono marker:text-xs"
+			class="ml-5 list-decimal space-y-1 text-sm leading-relaxed marker:font-mono marker:text-xs marker:text-muted-foreground"
 		>
 			{#each dataFlowSteps as step, i (i)}
 				<li class="md pl-1">{@html renderInlineMd(step)}</li>
@@ -248,12 +237,10 @@
 	{#if excerpt && excerpt.text.trim().length > 0}
 		<section class="space-y-2 px-5 py-4">
 			<div class="flex items-center justify-between gap-2">
-				<h3
-					class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-				>
+				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					{excerpt.source === 'enclosing_function' ? 'Enclosing function' : 'Excerpt'}
 				</h3>
-				<span class="text-muted-foreground font-mono text-[0.625rem]">
+				<span class="font-mono text-[0.625rem] text-muted-foreground">
 					L{excerpt.start_line}-{excerpt.end_line}
 				</span>
 			</div>
@@ -261,21 +248,19 @@
 				<div class="shiki-wrap">{@html excerptHtml}</div>
 			{:else}
 				<pre
-					class="border-border bg-muted/40 overflow-auto rounded-md border p-3 font-mono text-xs leading-relaxed">{excerpt.text}</pre>
+					class="overflow-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{excerpt.text}</pre>
 			{/if}
 		</section>
 	{:else if excerptError}
 		<section class="px-5 py-4">
-			<p class="text-muted-foreground text-xs italic">Excerpt unavailable: {excerptError}</p>
+			<p class="text-xs text-muted-foreground italic">Excerpt unavailable: {excerptError}</p>
 		</section>
 	{/if}
 
 	{#if verdict}
 		<section class="space-y-2 px-5 py-4">
 			<div class="flex items-center justify-between gap-2">
-				<h3
-					class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-				>
+				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					Verifier
 				</h3>
 				<div class="flex items-center gap-1.5 text-xs">
@@ -293,7 +278,7 @@
 					{/if}
 				</div>
 			</div>
-			<div class="md text-muted-foreground text-sm leading-relaxed">
+			<div class="md text-sm leading-relaxed text-muted-foreground">
 				{@html renderMd(verdict.reasoning)}
 			</div>
 		</section>
@@ -302,23 +287,21 @@
 			{@const ex = verdict.concrete_exploit}
 			<section class="space-y-2 px-5 py-4">
 				<div class="flex items-center justify-between gap-2">
-					<h3
-						class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-					>
+					<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 						Exploit
 					</h3>
 					<Badge variant="outline" class="font-mono text-[0.625rem]">{ex.kind}</Badge>
 				</div>
 				<p class="md text-sm">{@html renderInlineMd(ex.expected_effect)}</p>
-				<div class="bg-muted/40 space-y-1 rounded-md p-3 font-mono text-xs">
+				<div class="space-y-1 rounded-md bg-muted/40 p-3 font-mono text-xs">
 					{#if ex.request}
 						<div class="flex gap-2">
-							<span class="text-muted-foreground w-14 shrink-0">request</span>
+							<span class="w-14 shrink-0 text-muted-foreground">request</span>
 							<span class="break-all">{ex.request.method} {ex.request.path}</span>
 						</div>
 					{/if}
 					<div class="flex gap-2">
-						<span class="text-muted-foreground w-14 shrink-0">payload</span>
+						<span class="w-14 shrink-0 text-muted-foreground">payload</span>
 						<span class="break-all">{ex.payload}</span>
 					</div>
 				</div>
@@ -329,7 +312,7 @@
 	{#if patch}
 		<section class="space-y-3 px-5 py-4">
 			<div class="flex items-center justify-between gap-2">
-				<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					Patch
 				</h3>
 				<div class="flex items-center gap-1.5">
@@ -337,15 +320,16 @@
 						{patch.located.kind === 'not_found' ? 'not located' : patch.located.kind}
 					</Badge>
 					{#if applied}
-						<Badge class="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">applied ✓</Badge>
+						<Badge class="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">applied ✓</Badge
+						>
 					{/if}
 				</div>
 			</div>
 			{#if patchVariants.length > 1}
 				<div class="flex flex-wrap items-center gap-1">
-					<span
-						class="text-muted-foreground text-[0.625rem] uppercase tracking-wider mr-1"
-					>Variants</span>
+					<span class="mr-1 text-[0.625rem] tracking-wider text-muted-foreground uppercase"
+						>Variants</span
+					>
 					{#each patchVariants as _v, i (i)}
 						<button
 							type="button"
@@ -353,8 +337,8 @@
 							class="inline-flex h-5 min-w-5 items-center justify-center rounded px-1.5 font-mono text-[0.625rem] font-semibold {i ===
 							patchVariantIdx
 								? 'bg-foreground text-background'
-								: 'bg-muted text-muted-foreground hover:bg-muted/80'}"
-						>v{i + 1}</button>
+								: 'bg-muted text-muted-foreground hover:bg-muted/80'}">v{i + 1}</button
+						>
 					{/each}
 				</div>
 			{/if}
@@ -364,7 +348,7 @@
 			<div class="flex flex-wrap items-center gap-2">
 				{#if applied}
 					<Button size="sm" variant="outline" disabled>Applied to disk</Button>
-					<span class="text-muted-foreground text-xs">Use git to review or revert.</span>
+					<span class="text-xs text-muted-foreground">Use git to review or revert.</span>
 				{:else if patch.located.kind === 'not_found'}
 					<Button size="sm" disabled>Cannot apply (not located)</Button>
 				{:else}
@@ -372,7 +356,7 @@
 						{applyBusy ? 'Applying…' : 'Apply patch'}
 					</Button>
 					{#if patch.located.kind === 'fuzzy'}
-						<span class="text-muted-foreground text-xs italic"
+						<span class="text-xs text-muted-foreground italic"
 							>Fuzzy match — review the diff before applying.</span
 						>
 					{/if}
@@ -388,35 +372,33 @@
 				</Button>
 			</div>
 			{#if regenError}
-				<p class="text-destructive text-xs">Regenerate failed: {regenError}</p>
+				<p class="text-xs text-destructive">Regenerate failed: {regenError}</p>
 			{/if}
 			{#if applyError}
-				<p class="text-destructive text-xs">{applyError}</p>
+				<p class="text-xs text-destructive">{applyError}</p>
 			{/if}
 			{#if patch.diff}
 				{#if diffHtml}
 					<div class="shiki-wrap">{@html diffHtml}</div>
 				{:else}
 					<pre
-						class="border-border bg-muted/40 overflow-auto rounded-md border font-mono text-xs leading-relaxed">{#each patch.diff.split('\n') as line, i (i)}<div
-								class="px-3 {diffLineClass(line)}"
-							>{line || ' '}</div>{/each}</pre>
+						class="overflow-auto rounded-md border border-border bg-muted/40 font-mono text-xs leading-relaxed">{#each patch.diff.split('\n') as line, i (i)}<div
+								class="px-3 {diffLineClass(line)}">{line || ' '}</div>{/each}</pre>
 				{/if}
 			{:else}
-				<div class="text-muted-foreground text-xs italic">
+				<div class="text-xs text-muted-foreground italic">
 					old_block not located in current file — raw proposal below.
 				</div>
 				<pre
-					class="border-border bg-muted/40 overflow-auto rounded-md border p-3 font-mono text-xs"><span
-						class="text-red-700 dark:text-red-300">- {patch.proposal.old_block}</span>
+					class="overflow-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs"><span
+						class="text-red-700 dark:text-red-300">- {patch.proposal.old_block}</span
+					>
 {'\n'}<span class="text-green-700 dark:text-green-300">+ {patch.proposal.new_block}</span></pre>
 			{/if}
 		</section>
 	{:else if !scanning && hasVerdictKey && verdict?.is_reachable === false}
 		<section class="px-5 py-4">
-			<p class="text-muted-foreground text-xs italic">
-				Dropped by verifier — no patch generated.
-			</p>
+			<p class="text-xs text-muted-foreground italic">Dropped by verifier — no patch generated.</p>
 		</section>
 	{/if}
 </article>

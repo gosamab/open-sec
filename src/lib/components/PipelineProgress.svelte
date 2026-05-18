@@ -22,7 +22,7 @@
 	}
 </script>
 
-<div class="border-border bg-muted/20 flex items-center gap-3 border-b px-4 py-2">
+<div class="flex items-center gap-3 border-b border-border bg-muted/20 px-4 py-2">
 	<ol class="flex flex-1 items-center gap-1">
 		{#each PIPELINE_STAGES as s, i (s.key)}
 			{@const st = stateOf(i)}
@@ -53,7 +53,7 @@
 	</ol>
 	{#if rateLimitNotice}
 		<span
-			class="shrink-0 inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 font-mono text-xs text-amber-700 dark:text-amber-300"
+			class="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 font-mono text-xs text-amber-700 dark:text-amber-300"
 			title="Anthropic rate limit; auto-retrying"
 		>
 			<Loader size={10} strokeWidth={2.5} class="animate-spin" />
@@ -61,12 +61,9 @@
 		</span>
 	{/if}
 	{#if durations.total_ms > 0}
-		<span
-			class="text-muted-foreground shrink-0 font-mono text-xs"
-			title="Total scan duration"
-		>
+		<span class="shrink-0 font-mono text-xs text-muted-foreground" title="Total scan duration">
 			{formatDuration(durations.total_ms)}
 		</span>
 	{/if}
-	<span class="text-muted-foreground shrink-0 font-mono text-xs">{stage}</span>
+	<span class="shrink-0 font-mono text-xs text-muted-foreground">{stage}</span>
 </div>

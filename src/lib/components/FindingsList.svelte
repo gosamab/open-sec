@@ -123,7 +123,6 @@
 		{ key: 'line', label: 'Line' }
 	];
 
-
 	const KIND_OPTIONS: { key: KindFilter; label: string }[] = [
 		{ key: 'all', label: 'All' },
 		{ key: 'vuln', label: 'Vuln' },
@@ -131,17 +130,18 @@
 	];
 </script>
 
-<section class="border-border flex flex-col overflow-hidden border-r">
-	<div class="border-border flex h-10 items-center justify-between gap-2 border-b px-3">
-		<span class="text-muted-foreground truncate text-xs font-medium uppercase tracking-wide">
+<section class="flex flex-col overflow-hidden border-r border-border">
+	<div class="flex h-10 items-center justify-between gap-2 border-b border-border px-3">
+		<span class="truncate text-xs font-medium tracking-wide text-muted-foreground uppercase">
 			Findings{selectedFile ? ` · ${selectedFile}` : ''}
 		</span>
 		<div class="flex shrink-0 items-center gap-2">
 			<div class="relative" bind:this={panelRef}>
 				<button
 					type="button"
-					class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-6 items-center gap-1 rounded px-1.5 text-[0.6875rem] transition-colors {activeCount > 0
-						? 'text-foreground bg-muted/60'
+					class="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground {activeCount >
+					0
+						? 'bg-muted/60 text-foreground'
 						: ''}"
 					title="Filter & sort"
 					aria-label="Filter and sort findings"
@@ -167,7 +167,7 @@
 					<span>Filter</span>
 					{#if activeCount > 0}
 						<span
-							class="bg-foreground text-background inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 font-mono text-[0.5625rem] font-semibold leading-none"
+							class="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-foreground px-1 font-mono text-[0.5625rem] leading-none font-semibold text-background"
 						>
 							{activeCount}
 						</span>
@@ -175,13 +175,13 @@
 				</button>
 				{#if panelOpen}
 					<div
-						class="border-border bg-popover text-popover-foreground absolute right-0 top-full z-20 mt-1 w-72 space-y-3 rounded-md border p-3 shadow-md"
+						class="absolute top-full right-0 z-20 mt-1 w-72 space-y-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
 						role="menu"
 					>
 						<!-- Sort -->
 						<div class="space-y-1.5">
 							<div
-								class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
+								class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase"
 							>
 								Sort
 							</div>
@@ -201,7 +201,7 @@
 								<button
 									type="button"
 									onclick={toggleSortDir}
-									class="border-border text-muted-foreground hover:text-foreground ml-auto inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[0.6875rem]"
+									class="ml-auto inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[0.6875rem] text-muted-foreground hover:text-foreground"
 									title="Toggle sort direction"
 								>
 									{#if filterConfig.sortDir === 'asc'}
@@ -242,7 +242,7 @@
 						<!-- Severity -->
 						<div class="space-y-1.5">
 							<div
-								class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
+								class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase"
 							>
 								Severity
 							</div>
@@ -265,7 +265,7 @@
 						<!-- Status -->
 						<div class="space-y-1.5">
 							<div
-								class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
+								class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase"
 							>
 								Status
 							</div>
@@ -288,7 +288,7 @@
 						<!-- Kind -->
 						<div class="space-y-1.5">
 							<div
-								class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
+								class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase"
 							>
 								Kind
 							</div>
@@ -308,17 +308,17 @@
 							</div>
 						</div>
 
-						<div class="border-border flex items-center justify-end gap-2 border-t pt-2">
+						<div class="flex items-center justify-end gap-2 border-t border-border pt-2">
 							<button
 								type="button"
-								class="text-muted-foreground hover:text-foreground text-[0.6875rem] underline-offset-2 hover:underline"
+								class="text-[0.6875rem] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
 								onclick={resetFilter}
 							>
 								Reset
 							</button>
 							<button
 								type="button"
-								class="text-muted-foreground hover:text-foreground text-[0.6875rem]"
+								class="text-[0.6875rem] text-muted-foreground hover:text-foreground"
 								onclick={() => (panelOpen = false)}
 							>
 								Done
@@ -327,7 +327,7 @@
 					</div>
 				{/if}
 			</div>
-			<span class="text-muted-foreground text-xs">
+			<span class="text-xs text-muted-foreground">
 				{visibleFindings.length}{(filter || activeCount > 0) &&
 				allFindingsCount !== visibleFindings.length
 					? ` / ${allFindingsCount}`
@@ -336,7 +336,7 @@
 		</div>
 	</div>
 	{#if allFindingsCount > 0 || filter}
-		<div class="border-border space-y-1.5 border-b px-3 py-2">
+		<div class="space-y-1.5 border-b border-border px-3 py-2">
 			<Input
 				bind:value={filter}
 				placeholder="Filter by title, CWE, file…"
@@ -344,12 +344,8 @@
 				class="h-7 text-xs"
 			/>
 			{#if dismissedCount > 0}
-				<label class="text-muted-foreground flex items-center gap-1.5 text-xs">
-					<input
-						type="checkbox"
-						bind:checked={hideDismissed}
-						class="h-3 w-3 accent-current"
-					/>
+				<label class="flex items-center gap-1.5 text-xs text-muted-foreground">
+					<input type="checkbox" bind:checked={hideDismissed} class="h-3 w-3 accent-current" />
 					Hide dismissed ({dismissedCount})
 				</label>
 			{/if}
@@ -359,7 +355,7 @@
 		{#if visibleFindings.length === 0}
 			{#if scanning}
 				<div class="space-y-1 px-4 py-6 text-xs">
-					<p class="text-muted-foreground animate-pulse">{stage}</p>
+					<p class="animate-pulse text-muted-foreground">{stage}</p>
 					{#if hasWalk}
 						<p class="text-muted-foreground/70">
 							Findings will appear here as each file is scanned.
@@ -371,7 +367,7 @@
 					<p>No findings match <span class="font-mono">&quot;{filter}&quot;</span>.</p>
 					<button
 						type="button"
-						class="text-muted-foreground hover:text-foreground underline underline-offset-2"
+						class="text-muted-foreground underline underline-offset-2 hover:text-foreground"
 						onclick={() => (filter = '')}
 					>
 						Clear filter
@@ -386,18 +382,18 @@
 								{skipReasonLabel(selectedFileNode.skipReason!)}
 							</span>
 						</p>
-						<p class="text-muted-foreground/80 leading-relaxed">
+						<p class="leading-relaxed text-muted-foreground/80">
 							This file never reached the LLM. See detail pane for context.
 						</p>
 					{:else if selectedFileNode.status === 'triage_skipped'}
 						<p>Triage skipped this file.</p>
-						<p class="text-muted-foreground/80 leading-relaxed">
+						<p class="leading-relaxed text-muted-foreground/80">
 							Haiku triage decided this file has no security surface. See detail pane for its
 							reason.
 						</p>
 					{:else}
 						<p class="text-destructive">Detect errored on this file.</p>
-						<p class="text-muted-foreground/80 leading-relaxed">
+						<p class="leading-relaxed text-muted-foreground/80">
 							See detail pane for the error message.
 						</p>
 					{/if}
@@ -405,29 +401,29 @@
 			{:else if stage === 'done' && allFindingsCount === 0}
 				{#if detectErrors.size > 0}
 					<div class="space-y-2 px-4 py-8 text-center text-sm">
-						<div class="text-destructive text-2xl leading-none">!</div>
+						<div class="text-2xl leading-none text-destructive">!</div>
 						<p class="font-medium">Scan finished with errors</p>
-						<p class="text-muted-foreground text-xs leading-relaxed">
-							{detectErrors.size} of {hasWalk ? walkCandidateCount : 0} file(s) couldn't be scanned.
-							See the summary pane for details and retry options.
+						<p class="text-xs leading-relaxed text-muted-foreground">
+							{detectErrors.size} of {hasWalk ? walkCandidateCount : 0} file(s) couldn't be scanned. See
+							the summary pane for details and retry options.
 						</p>
 					</div>
 				{:else}
 					<div class="space-y-2 px-4 py-8 text-center text-sm">
 						<div class="text-2xl">✓</div>
 						<p class="font-medium">Clean scan</p>
-						<p class="text-muted-foreground text-xs leading-relaxed">
+						<p class="text-xs leading-relaxed text-muted-foreground">
 							No vulnerabilities found in
 							{hasWalk ? walkCandidateCount : 0} file(s).
 						</p>
 					</div>
 				{/if}
 			{:else if stage === 'done' && selectedFile}
-				<p class="text-muted-foreground px-4 py-4 text-xs">
+				<p class="px-4 py-4 text-xs text-muted-foreground">
 					No findings in <span class="font-mono">{selectedFile}</span>.
 				</p>
 			{:else}
-				<p class="text-muted-foreground px-4 py-4 text-xs">
+				<p class="px-4 py-4 text-xs text-muted-foreground">
 					Pick a folder above and hit Scan to see findings here.
 				</p>
 			{/if}
@@ -437,7 +433,7 @@
 				<button
 					type="button"
 					data-finding-id={f.id}
-					class="hover:bg-muted/40 border-border block w-full border-b px-4 py-3 text-left {selectedFindingId ===
+					class="block w-full border-b border-border px-4 py-3 text-left hover:bg-muted/40 {selectedFindingId ===
 					f.id
 						? 'bg-muted/60'
 						: ''} {status === 'dismissed' || status === 'dropped' ? 'opacity-60' : ''}"
@@ -448,18 +444,16 @@
 							<div class="flex flex-wrap items-center gap-1.5">
 								<Badge class={severityClass(f.severity)}>{f.severity}</Badge>
 								<Badge class={statusClass(status)}>{statusLabelFor(f, statusInputs)}</Badge>
-								<span class="text-muted-foreground font-mono text-xs">{f.cwe}</span>
+								<span class="font-mono text-xs text-muted-foreground">{f.cwe}</span>
 								{#if f.owasp}
-									<span class="text-muted-foreground font-mono text-xs">
+									<span class="font-mono text-xs text-muted-foreground">
 										· {f.owasp}
 									</span>
 								{/if}
 							</div>
 							<div class="text-sm font-medium">{f.title}</div>
-							<div class="text-muted-foreground font-mono text-xs">
-								{rel}:{f.line_start}{f.line_end !== f.line_start
-									? `-${f.line_end}`
-									: ''}
+							<div class="font-mono text-xs text-muted-foreground">
+								{rel}:{f.line_start}{f.line_end !== f.line_start ? `-${f.line_end}` : ''}
 							</div>
 						</div>
 					</div>

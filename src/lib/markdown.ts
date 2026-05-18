@@ -34,9 +34,7 @@ function ensureAnchorHook() {
 		const href = node.getAttribute('href') ?? '';
 		const lower = href.trim().toLowerCase();
 		const ok =
-			lower.startsWith('https://') ||
-			lower.startsWith('http://') ||
-			lower.startsWith('mailto:');
+			lower.startsWith('https://') || lower.startsWith('http://') || lower.startsWith('mailto:');
 		if (!ok) {
 			// Drop the link entirely — leave the inner text in place.
 			node.removeAttribute('href');

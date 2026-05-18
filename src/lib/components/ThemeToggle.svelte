@@ -51,7 +51,7 @@
 	<button
 		type="button"
 		onclick={() => (menuOpen = !menuOpen)}
-		class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
+		class="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 		title="Theme: {theme.value}"
 		aria-label="Theme"
 		aria-haspopup="menu"
@@ -62,7 +62,7 @@
 
 	{#if menuOpen}
 		<div
-			class="border-border bg-popover text-popover-foreground absolute right-0 top-full z-20 mt-1 w-48 overflow-hidden rounded-md border shadow-md"
+			class="absolute top-full right-0 z-20 mt-1 w-48 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md"
 			role="menu"
 		>
 			{#each OPTIONS as opt (opt.value)}
@@ -72,13 +72,15 @@
 					type="button"
 					role="menuitemradio"
 					aria-checked={selected}
-					class="hover:bg-muted flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs {selected
+					class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs hover:bg-muted {selected
 						? 'bg-muted/60'
 						: ''}"
 					onclick={() => choose(opt.value)}
 				>
 					<div class="flex min-w-0 flex-1 items-center gap-2">
-						<span class="text-muted-foreground inline-flex h-4 w-4 shrink-0 items-center justify-center">
+						<span
+							class="inline-flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground"
+						>
 							<Icon size={13} />
 						</span>
 						<span class="truncate font-medium">{opt.label}</span>

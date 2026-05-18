@@ -107,20 +107,20 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="bg-background flex h-screen flex-col">
+<div class="flex h-screen flex-col bg-background">
 	<!-- Topbar (theme toggle only) -->
 	<header class="flex items-center justify-end px-4 py-3">
 		<ThemeToggle />
 	</header>
 
-	<main class="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 pb-12 pt-4">
+	<main class="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 pt-4 pb-12">
 		<!-- Branding -->
 		<div class="space-y-2">
 			<div class="flex items-center gap-3">
 				<img src={logo} alt="" width="40" height="40" class="rounded-lg" />
 				<h1 class="text-3xl font-semibold tracking-tight">Open Security</h1>
 			</div>
-			<p class="text-muted-foreground text-sm">
+			<p class="text-sm text-muted-foreground">
 				AI-powered security code scanner. Pick a folder to begin.
 			</p>
 		</div>
@@ -149,20 +149,20 @@
 					</svg>
 				</span>
 				<span class="flex-1 text-left">New project</span>
-				<span class="text-primary-foreground/60 text-xs">⌘O</span>
+				<span class="text-xs text-primary-foreground/60">⌘O</span>
 			</Button>
 		</div>
 
 		<!-- Recents -->
 		<section class="flex flex-col gap-2">
 			<div class="flex items-center justify-between">
-				<h2 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+				<h2 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 					Recent projects
 				</h2>
 				{#if groups.length > 0}
 					<button
 						type="button"
-						class="text-muted-foreground hover:text-foreground text-xs"
+						class="text-xs text-muted-foreground hover:text-foreground"
 						onclick={clearAll}
 					>
 						Clear all
@@ -170,18 +170,22 @@
 				{/if}
 			</div>
 			{#if loadingGroups}
-				<p class="text-muted-foreground border-border rounded-md border border-dashed px-4 py-6 text-center text-xs">
+				<p
+					class="rounded-md border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground"
+				>
 					Loading…
 				</p>
 			{:else if groups.length === 0}
-				<p class="text-muted-foreground border-border rounded-md border border-dashed px-4 py-6 text-center text-xs">
+				<p
+					class="rounded-md border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground"
+				>
 					No projects scanned yet.
 				</p>
 			{:else}
-				<div class="divide-border divide-y rounded-md border">
+				<div class="divide-y divide-border rounded-md border">
 					{#each groups as g (g.root)}
 						<div
-							class="hover:bg-muted/50 group flex cursor-pointer items-center gap-3 px-4 py-2.5"
+							class="group flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-muted/50"
 							role="button"
 							tabindex="0"
 							onclick={() => onOpenPast(g)}
@@ -202,17 +206,19 @@
 								stroke-width="2"
 								stroke-linecap="round"
 								stroke-linejoin="round"
-								class="text-muted-foreground shrink-0"
+								class="shrink-0 text-muted-foreground"
 							>
-								<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+								<path
+									d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+								/>
 							</svg>
 							<div class="flex-1 truncate">
 								<div class="truncate text-sm font-medium">{basename(g.root)}</div>
-								<div class="text-muted-foreground truncate font-mono text-xs">
+								<div class="truncate font-mono text-xs text-muted-foreground">
 									{parentDir(g.root)}
 								</div>
 							</div>
-							<div class="text-muted-foreground shrink-0 text-right text-xs">
+							<div class="shrink-0 text-right text-xs text-muted-foreground">
 								<div>{g.latest_kept} kept</div>
 								<div class="text-muted-foreground/70">
 									{relativeTime(g.latest_started_at)}
@@ -220,7 +226,7 @@
 							</div>
 							<button
 								type="button"
-								class="text-muted-foreground/50 hover:text-destructive inline-flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100"
+								class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
 								aria-label="Remove from recents"
 								title="Remove all scans for this project"
 								onclick={(e) => removeGroup(e, g)}

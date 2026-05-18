@@ -170,10 +170,10 @@
 /* Markdown rendering inside finding-detail prose.
    Scoped to the `.md` class so it doesn't leak into the rest of the UI. */
 .md code {
-	@apply bg-muted/70 text-foreground rounded px-1 py-[0.05rem] font-mono text-[0.85em];
+	@apply rounded bg-muted/70 px-1 py-[0.05rem] font-mono text-[0.85em] text-foreground;
 }
 .md pre {
-	@apply bg-muted/40 border-border my-2 overflow-auto rounded-md border p-3 font-mono text-xs leading-relaxed;
+	@apply my-2 overflow-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed;
 }
 .md pre code {
 	@apply bg-transparent p-0;
@@ -214,7 +214,7 @@
 	line-height: 1.5;
 }
 .shiki-wrap pre.shiki {
-	@apply border-border overflow-auto rounded-md border p-3;
+	@apply overflow-auto rounded-md border border-border p-3;
 	margin: 0;
 }
 .dark .shiki,

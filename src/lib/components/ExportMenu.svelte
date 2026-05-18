@@ -58,13 +58,13 @@
 	</Button>
 	{#if open}
 		<div
-			class="border-border bg-popover text-popover-foreground absolute right-0 top-full z-10 mt-1 w-48 overflow-hidden rounded-md border shadow-md"
+			class="absolute top-full right-0 z-10 mt-1 w-48 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md"
 			role="menu"
 		>
 			<button
 				type="button"
 				role="menuitem"
-				class="hover:bg-muted block w-full px-3 py-2 text-left text-xs"
+				class="block w-full px-3 py-2 text-left text-xs hover:bg-muted"
 				onclick={() => pick(onMarkdown)}
 			>
 				<div class="font-medium">Markdown</div>
@@ -73,7 +73,7 @@
 			<button
 				type="button"
 				role="menuitem"
-				class="hover:bg-muted block w-full px-3 py-2 text-left text-xs"
+				class="block w-full px-3 py-2 text-left text-xs hover:bg-muted"
 				onclick={() => pick(onSarif)}
 			>
 				<div class="font-medium">SARIF</div>

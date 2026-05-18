@@ -66,13 +66,13 @@
 
 {#if variant === 'card'}
 	<div
-		class="border-amber-300/50 bg-amber-50/50 dark:border-amber-500/30 dark:bg-amber-950/20 space-y-3 rounded-md border p-4"
+		class="space-y-3 rounded-md border border-amber-300/50 bg-amber-50/50 p-4 dark:border-amber-500/30 dark:bg-amber-950/20"
 	>
 		<div class="space-y-1">
 			<p class="text-sm font-medium">Connect your Anthropic API key to get started</p>
-			<p class="text-muted-foreground text-xs leading-relaxed">
-				Open Security uses Claude to scan your code. Your key is stored locally in the macOS keychain
-				and only ever sent to Anthropic.
+			<p class="text-xs leading-relaxed text-muted-foreground">
+				Open Security uses Claude to scan your code. Your key is stored locally in the macOS
+				keychain and only ever sent to Anthropic.
 				<button
 					type="button"
 					class="text-primary underline-offset-2 hover:underline"
@@ -106,11 +106,11 @@
 			</Button>
 		</form>
 		{#if errorMsg}
-			<p class="text-destructive text-xs" role="alert">{errorMsg}</p>
+			<p class="text-xs text-destructive" role="alert">{errorMsg}</p>
 		{/if}
 	</div>
 {:else}
-	<div class="border-border bg-amber-50/40 dark:bg-amber-950/20 border-b px-4 py-3">
+	<div class="border-b border-border bg-amber-50/40 px-4 py-3 dark:bg-amber-950/20">
 		<form class="flex flex-wrap items-center gap-2" onsubmit={save}>
 			<span class="text-sm font-medium">Anthropic API key required</span>
 			<Input
@@ -134,13 +134,13 @@
 			</Button>
 			<button
 				type="button"
-				class="text-muted-foreground hover:text-foreground text-xs underline-offset-2 hover:underline"
+				class="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
 				onclick={openConsole}
 			>
 				Get a key →
 			</button>
 			{#if errorMsg}
-				<span class="text-destructive basis-full text-xs" role="alert">{errorMsg}</span>
+				<span class="basis-full text-xs text-destructive" role="alert">{errorMsg}</span>
 			{/if}
 		</form>
 	</div>

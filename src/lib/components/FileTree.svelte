@@ -42,26 +42,24 @@
 	}
 </script>
 
-<aside class="border-border flex flex-col overflow-hidden border-r">
-	<div class="border-border flex h-10 items-center justify-between border-b px-3">
-		<span class="text-muted-foreground text-xs font-medium uppercase tracking-wide">Files</span>
-		<span class="text-muted-foreground text-xs">{totalFileNodes}</span>
+<aside class="flex flex-col overflow-hidden border-r border-border">
+	<div class="flex h-10 items-center justify-between border-b border-border px-3">
+		<span class="text-xs font-medium tracking-wide text-muted-foreground uppercase">Files</span>
+		<span class="text-xs text-muted-foreground">{totalFileNodes}</span>
 	</div>
 	<div class="flex-1 overflow-y-auto">
 		{#if totalFileNodes === 0 && !scanning}
 			{#if stage === 'done' && hasWalk && walkCandidateCount === 0}
-				<p class="text-muted-foreground px-3 py-3 text-xs">
-					No scannable files in this folder.
-				</p>
+				<p class="px-3 py-3 text-xs text-muted-foreground">No scannable files in this folder.</p>
 			{:else}
-				<p class="text-muted-foreground px-3 py-3 text-xs">Hit Scan to see the file tree.</p>
+				<p class="px-3 py-3 text-xs text-muted-foreground">Hit Scan to see the file tree.</p>
 			{/if}
 		{:else if totalFileNodes === 0 && scanning}
-			<p class="text-muted-foreground animate-pulse px-3 py-3 text-xs">{stage}</p>
+			<p class="animate-pulse px-3 py-3 text-xs text-muted-foreground">{stage}</p>
 		{:else}
 			<button
 				type="button"
-				class="hover:bg-muted/50 flex w-full items-center justify-between px-3 py-1.5 text-left text-xs {selectedFile ===
+				class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs hover:bg-muted/50 {selectedFile ===
 				null
 					? 'bg-muted'
 					: ''}"
@@ -76,7 +74,7 @@
 					{@const expanded = expandedFolders.has(f.path)}
 					<button
 						type="button"
-						class="hover:bg-muted/50 flex w-full items-center gap-1 py-1 pr-3 text-left {f.allSkipped
+						class="flex w-full items-center gap-1 py-1 pr-3 text-left hover:bg-muted/50 {f.allSkipped
 							? 'opacity-50'
 							: ''}"
 						style="padding-left: {0.5 + row.depth * 0.75}rem"
@@ -84,7 +82,7 @@
 						title={f.allSkipped ? `All ${f.skippedCount} file(s) skipped` : ''}
 					>
 						<span
-							class="text-muted-foreground inline-flex h-3 w-3 shrink-0 items-center justify-center transition-transform"
+							class="inline-flex h-3 w-3 shrink-0 items-center justify-center text-muted-foreground transition-transform"
 							style={expanded ? 'transform: rotate(90deg)' : ''}
 						>
 							<svg
@@ -111,7 +109,7 @@
 							stroke-width="2"
 							stroke-linecap="round"
 							stroke-linejoin="round"
-							class="text-muted-foreground/80 shrink-0"
+							class="shrink-0 text-muted-foreground/80"
 						>
 							<path
 								d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
@@ -124,12 +122,12 @@
 							<span class="h-2 w-2 shrink-0 rounded-full {severityDot(f.topSeverity)}"></span>
 						{/if}
 						{#if f.count > 0}
-							<span class="text-muted-foreground text-xs tabular-nums">{f.count}</span>
+							<span class="text-xs text-muted-foreground tabular-nums">{f.count}</span>
 						{:else if f.allSkipped}
-							<span class="text-muted-foreground/70 text-[0.625rem] italic">skip</span>
+							<span class="text-[0.625rem] text-muted-foreground/70 italic">skip</span>
 						{:else if f.skippedCount > 0}
 							<span
-								class="text-muted-foreground/60 text-[0.625rem] italic tabular-nums"
+								class="text-[0.625rem] text-muted-foreground/60 italic tabular-nums"
 								title="{f.skippedCount} skipped file(s) inside"
 							>
 								{f.skippedCount}
@@ -138,11 +136,10 @@
 					</button>
 				{:else}
 					{@const f = row.node}
-					{@const isSkipped =
-						f.status === 'pre_triage_skipped' || f.status === 'triage_skipped'}
+					{@const isSkipped = f.status === 'pre_triage_skipped' || f.status === 'triage_skipped'}
 					<button
 						type="button"
-						class="hover:bg-muted/50 flex w-full items-center gap-1.5 py-1 pr-3 text-left {selectedFile ===
+						class="flex w-full items-center gap-1.5 py-1 pr-3 text-left hover:bg-muted/50 {selectedFile ===
 						f.path
 							? 'bg-muted'
 							: ''} {isSkipped ? 'opacity-60' : ''}"
@@ -160,7 +157,7 @@
 						<span class="inline-block w-3 shrink-0"></span>
 						{#if isSkipped}
 							<span
-								class="text-muted-foreground/70 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-zinc-300/30 font-mono text-[0.625rem] italic dark:bg-zinc-700/40"
+								class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-zinc-300/30 font-mono text-[0.625rem] text-muted-foreground/70 italic dark:bg-zinc-700/40"
 							>
 								S
 							</span>
@@ -175,7 +172,7 @@
 							</span>
 						{/if}
 						{#if f.status === 'errored'}
-							<span class="text-destructive shrink-0">
+							<span class="shrink-0 text-destructive">
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
 									width="10"
@@ -199,13 +196,13 @@
 						{/if}
 						<span class="flex-1 truncate font-mono text-xs">{f.name}</span>
 						{#if f.count > 0}
-							<span class="text-muted-foreground text-xs tabular-nums">{f.count}</span>
+							<span class="text-xs text-muted-foreground tabular-nums">{f.count}</span>
 						{:else if f.skipReason}
-							<span class="text-muted-foreground/70 text-[0.625rem] italic">
+							<span class="text-[0.625rem] text-muted-foreground/70 italic">
 								{skipReasonLabel(f.skipReason)}
 							</span>
 						{:else if f.status === 'triage_skipped'}
-							<span class="text-muted-foreground/70 text-[0.625rem] italic">skip</span>
+							<span class="text-[0.625rem] text-muted-foreground/70 italic">skip</span>
 						{/if}
 					</button>
 				{/if}
@@ -215,7 +212,7 @@
 
 	{#if hasTriaged}
 		<div
-			class="border-border text-muted-foreground border-t px-3 py-2 text-[0.6875rem] leading-relaxed"
+			class="border-t border-border px-3 py-2 text-[0.6875rem] leading-relaxed text-muted-foreground"
 		>
 			<span class="font-medium">Priority</span>
 			<div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono">

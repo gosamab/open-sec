@@ -75,27 +75,21 @@
 		{ key: 'medium', label: 'Medium' },
 		{ key: 'low', label: 'Low' }
 	];
-
 </script>
 
 <div class="p-4">
 	<div class="space-y-6">
 		{#if !scanResult && !scanning}
 			<div class="space-y-3 rounded-md border border-dashed p-6 text-center">
-				<p class="text-muted-foreground text-xs">
-					Ready to scan this folder. The pipeline runs triage → detect → verify → patch and
-					persists the result.
+				<p class="text-xs text-muted-foreground">
+					Ready to scan this folder. The pipeline runs triage → detect → verify → patch and persists
+					the result.
 				</p>
-				<Button
-					size="lg"
-					onclick={onRunScan}
-					disabled={!root || !keyConfigured}
-					class="w-full"
-				>
+				<Button size="lg" onclick={onRunScan} disabled={!root || !keyConfigured} class="w-full">
 					Scan this folder
 				</Button>
 				{#if !keyConfigured}
-					<p class="text-muted-foreground text-xs">
+					<p class="text-xs text-muted-foreground">
 						Set the Anthropic API key from the start screen first.
 					</p>
 				{/if}
@@ -109,7 +103,7 @@
 						<Badge class="bg-amber-500/15 text-amber-700 dark:text-amber-300">cancelled</Badge>
 					{/if}
 				</div>
-				<p class="text-muted-foreground break-all font-mono text-xs" title={root}>
+				<p class="font-mono text-xs break-all text-muted-foreground" title={root}>
 					{root || '—'}
 				</p>
 			</div>
@@ -117,10 +111,10 @@
 			{#if detectErrors.size > 0}
 				<details
 					open
-					class="group border-destructive/40 bg-destructive/5 overflow-hidden rounded-md border"
+					class="group overflow-hidden rounded-md border border-destructive/40 bg-destructive/5"
 				>
 					<summary
-						class="hover:bg-destructive/10 flex cursor-pointer items-center justify-between gap-2 px-3 py-2 [&::-webkit-details-marker]:hidden"
+						class="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 hover:bg-destructive/10 [&::-webkit-details-marker]:hidden"
 					>
 						<div class="flex min-w-0 items-center gap-2">
 							<svg
@@ -133,18 +127,18 @@
 								stroke-width="2.5"
 								stroke-linecap="round"
 								stroke-linejoin="round"
-								class="text-muted-foreground shrink-0 transition-transform group-open:rotate-90"
+								class="shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
 							>
 								<path d="m9 18 6-6-6-6" />
 							</svg>
-							<span class="text-destructive truncate text-xs font-medium">
+							<span class="truncate text-xs font-medium text-destructive">
 								Detect errors ({detectErrors.size})
 							</span>
 						</div>
 						<div class="flex shrink-0 items-center gap-2">
 							<button
 								type="button"
-								class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-5 items-center gap-1 rounded px-1.5 text-[0.625rem] transition-colors disabled:opacity-50"
+								class="inline-flex h-5 items-center gap-1 rounded px-1.5 text-[0.625rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
 								disabled={retryingAll || retryingFiles.size > 0 || scanning}
 								onclick={(e) => {
 									// Without this, the click would also toggle the <details>.
@@ -188,22 +182,20 @@
 									Retry all
 								{/if}
 							</button>
-							<span class="text-muted-foreground/80 font-mono text-[0.625rem]">
+							<span class="font-mono text-[0.625rem] text-muted-foreground/80">
 								{detectErrors.size} of {walk?.candidates.length ?? 0} file(s)
 							</span>
 						</div>
 					</summary>
-					<ul
-						class="border-destructive/30 max-h-72 space-y-1 overflow-y-auto border-t p-1"
-					>
+					<ul class="max-h-72 space-y-1 overflow-y-auto border-t border-destructive/30 p-1">
 						{#each Array.from(detectErrors) as [rel, msg] (rel)}
 							{@const h = humanizeError(msg)}
 							{@const retrying = retryingFiles.has(rel)}
-							<li class="hover:bg-muted/40 rounded px-2 py-2">
+							<li class="rounded px-2 py-2 hover:bg-muted/40">
 								<div class="flex items-start justify-between gap-2">
 									<button
 										type="button"
-										class="text-primary flex-1 truncate text-left text-xs hover:underline"
+										class="flex-1 truncate text-left text-xs text-primary hover:underline"
 										onclick={() => onSelectFile(rel)}
 										title={rel}
 									>
@@ -211,7 +203,7 @@
 									</button>
 									<button
 										type="button"
-										class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[0.625rem] transition-colors disabled:opacity-50"
+										class="inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[0.625rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
 										disabled={retrying || scanning}
 										onclick={() => onRetryDetect(rel)}
 										title="Re-run detect on this file (no verify/patch)"
@@ -253,7 +245,7 @@
 								</div>
 								<div class="mt-1 text-xs">{h.title}</div>
 								{#if h.detail}
-									<div class="text-muted-foreground mt-0.5 text-[0.6875rem] leading-relaxed">
+									<div class="mt-0.5 text-[0.6875rem] leading-relaxed text-muted-foreground">
 										{h.detail}
 									</div>
 								{/if}
@@ -264,7 +256,7 @@
 			{/if}
 
 			<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
-				<dt class="text-muted-foreground py-0.5">Files scanned</dt>
+				<dt class="py-0.5 text-muted-foreground">Files scanned</dt>
 				<dd class="py-0.5 text-right font-mono tabular-nums">
 					{walk?.candidates.length ?? 0}{#if walk && walk.skipped.length > 0}<span
 							class="text-muted-foreground/70"
@@ -273,15 +265,15 @@
 						>{/if}
 				</dd>
 				{#if detectErrors.size > 0}
-					<dt class="text-destructive py-0.5">Detect errors</dt>
-					<dd class="text-destructive py-0.5 text-right font-mono tabular-nums">
+					<dt class="py-0.5 text-destructive">Detect errors</dt>
+					<dd class="py-0.5 text-right font-mono text-destructive tabular-nums">
 						{detectErrors.size}
 					</dd>
 				{/if}
-				<dt class="text-muted-foreground py-0.5">Patches drafted</dt>
+				<dt class="py-0.5 text-muted-foreground">Patches drafted</dt>
 				<dd class="py-0.5 text-right font-mono tabular-nums">{patchCount}</dd>
 				{#if durations.total_ms > 0}
-					<dt class="text-muted-foreground py-0.5">Duration</dt>
+					<dt class="py-0.5 text-muted-foreground">Duration</dt>
 					<dd class="py-0.5 text-right font-mono tabular-nums">
 						{formatDuration(durations.total_ms)}
 					</dd>
@@ -291,12 +283,10 @@
 			{#if allFindingsTotal > 0}
 				<div class="space-y-1.5">
 					<div class="flex items-baseline justify-between gap-2">
-						<div
-							class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-						>
+						<div class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 							Severity
 						</div>
-						<div class="text-muted-foreground/70 text-[0.625rem]">
+						<div class="text-[0.625rem] text-muted-foreground/70">
 							{allFindingsTotal} total
 						</div>
 					</div>
@@ -304,9 +294,7 @@
 						{#each SEVERITY_ROWS as row (row.key)}
 							{@const n = severityCounts[row.key]}
 							<dt
-								class="flex items-center gap-2 py-0.5 {n === 0
-									? 'text-muted-foreground/50'
-									: ''}"
+								class="flex items-center gap-2 py-0.5 {n === 0 ? 'text-muted-foreground/50' : ''}"
 							>
 								<span
 									class="h-2 w-2 shrink-0 rounded-full {severityDot(row.key)} {n === 0
@@ -336,21 +324,17 @@
 
 			<div class="space-y-1.5">
 				<div class="flex items-baseline justify-between gap-2">
-					<div
-						class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-					>
+					<div class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 						Status
 					</div>
-					<div class="text-muted-foreground/70 text-[0.625rem]">one per finding</div>
+					<div class="text-[0.625rem] text-muted-foreground/70">one per finding</div>
 				</div>
 				<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
 					{#each STATUS_OPTIONS as row (row.key)}
 						{@const n = totals[row.key]}
 						{#if n > 0 || row.key === 'open' || row.key === 'patched'}
 							<dt
-								class="flex items-center gap-2 py-0.5 {n === 0
-									? 'text-muted-foreground/50'
-									: ''}"
+								class="flex items-center gap-2 py-0.5 {n === 0 ? 'text-muted-foreground/50' : ''}"
 							>
 								<span
 									class="h-2 w-2 shrink-0 rounded-full {statusDotClass(row.key)} {n === 0
@@ -373,9 +357,9 @@
 		</div>
 
 		{#if totalTokens > 0 || durations.total_ms > 0}
-			<details class="group border-border overflow-hidden rounded-md border">
+			<details class="group overflow-hidden rounded-md border border-border">
 				<summary
-					class="hover:bg-muted/30 flex cursor-pointer items-center justify-between px-3 py-2 [&::-webkit-details-marker]:hidden"
+					class="flex cursor-pointer items-center justify-between px-3 py-2 hover:bg-muted/30 [&::-webkit-details-marker]:hidden"
 				>
 					<div class="flex items-center gap-2">
 						<svg
@@ -394,15 +378,15 @@
 						</svg>
 						<span class="text-xs font-medium">Token usage</span>
 					</div>
-					<span class="text-muted-foreground font-mono text-xs">
+					<span class="font-mono text-xs text-muted-foreground">
 						{compactTokens(totalTokens)}
 					</span>
 				</summary>
-				<div class="border-border bg-muted/10 border-t">
+				<div class="border-t border-border bg-muted/10">
 					<table class="w-full text-xs">
 						<thead>
 							<tr
-								class="text-muted-foreground/70 border-border/60 border-b text-[0.625rem] uppercase tracking-wider"
+								class="border-b border-border/60 text-[0.625rem] tracking-wider text-muted-foreground/70 uppercase"
 							>
 								<th class="px-3 py-1.5 text-left font-medium">Stage</th>
 								<th class="px-2 py-1.5 text-right font-medium">In</th>
@@ -413,7 +397,7 @@
 						</thead>
 						<tbody class="font-mono">
 							{#if durations.ingest_ms > 0}
-								<tr class="border-border/30 border-b last:border-b-0 text-muted-foreground/80">
+								<tr class="border-b border-border/30 text-muted-foreground/80 last:border-b-0">
 									<td class="px-3 py-1">ingest</td>
 									<td class="px-2 py-1 text-right tabular-nums">—</td>
 									<td class="px-2 py-1 text-right tabular-nums">—</td>
@@ -424,7 +408,7 @@
 								</tr>
 							{/if}
 							{#each usageRows as row (row.name)}
-								<tr class="border-border/30 border-b last:border-b-0">
+								<tr class="border-b border-border/30 last:border-b-0">
 									<td class="px-3 py-1">{row.name}</td>
 									<td class="px-2 py-1 text-right tabular-nums">
 										{row.u.input_tokens.toLocaleString()}
@@ -432,7 +416,7 @@
 									<td class="px-2 py-1 text-right tabular-nums">
 										{row.u.output_tokens.toLocaleString()}
 									</td>
-									<td class="text-muted-foreground px-2 py-1 text-right tabular-nums">
+									<td class="px-2 py-1 text-right text-muted-foreground tabular-nums">
 										{row.u.cache_read_input_tokens.toLocaleString()}
 									</td>
 									<td class="px-3 py-1 text-right tabular-nums">
@@ -442,7 +426,7 @@
 							{/each}
 						</tbody>
 						<tfoot>
-							<tr class="border-border/60 bg-muted/30 border-t font-semibold">
+							<tr class="border-t border-border/60 bg-muted/30 font-semibold">
 								<td class="px-3 py-1.5">Total</td>
 								<td class="px-2 py-1.5 text-right tabular-nums">
 									{usage.total.input_tokens.toLocaleString()}
@@ -450,7 +434,7 @@
 								<td class="px-2 py-1.5 text-right tabular-nums">
 									{usage.total.output_tokens.toLocaleString()}
 								</td>
-								<td class="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
+								<td class="px-2 py-1.5 text-right text-muted-foreground tabular-nums">
 									{usage.total.cache_read_input_tokens.toLocaleString()}
 								</td>
 								<td class="px-3 py-1.5 text-right tabular-nums">
@@ -465,10 +449,10 @@
 
 		{#if walk && walk.skipped.length > 0}
 			<details class="text-sm">
-				<summary class="text-muted-foreground cursor-pointer text-xs">
+				<summary class="cursor-pointer text-xs text-muted-foreground">
 					Pre-triage skips ({walk.skipped.length})
 				</summary>
-				<ul class="text-muted-foreground mt-2 space-y-0.5 font-mono text-xs">
+				<ul class="mt-2 space-y-0.5 font-mono text-xs text-muted-foreground">
 					{#each walk.skipped.slice(0, 30) as s (s.rel_path)}
 						<li>
 							<span class="text-amber-600">{skipReasonLabel(s.reason)}</span>
@@ -483,9 +467,7 @@
 		{/if}
 
 		{#if !scanResult && !scanning && totalFileNodes === 0}
-			<p class="text-muted-foreground text-xs">
-				Select a folder above and hit Scan to begin.
-			</p>
+			<p class="text-xs text-muted-foreground">Select a folder above and hit Scan to begin.</p>
 		{/if}
 	</div>
 </div>

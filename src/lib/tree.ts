@@ -5,14 +5,7 @@
  * `VisibleRow[]` we compute here.
  */
 
-import type {
-	Finding,
-	Priority,
-	Severity,
-	SkipReason,
-	TriagedFile,
-	WalkResult
-} from './ipc';
+import type { Finding, Priority, Severity, SkipReason, TriagedFile, WalkResult } from './ipc';
 import { SEVERITY_ORDER, basename, severityRank } from './scan-display';
 
 export type FileStatus =
@@ -187,8 +180,7 @@ export function nestFiles(files: FileNode[]): TreeNode[] {
 		node: TreeNode
 	): { count: number; topSev: Severity | null; skipped: number; allSkipped: boolean } => {
 		if (node.type === 'file') {
-			const isSkipped =
-				node.status === 'pre_triage_skipped' || node.status === 'triage_skipped';
+			const isSkipped = node.status === 'pre_triage_skipped' || node.status === 'triage_skipped';
 			return {
 				count: node.count,
 				topSev: node.topSeverity,

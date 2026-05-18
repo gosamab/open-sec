@@ -7,3 +7,14 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Auto-generated build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Fixtures are corpora, not source — leave them alone
+/fixtures/
+
+# Workflow files & docs are not part of the code style sweep
+/.github/
+*.md

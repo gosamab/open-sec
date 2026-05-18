@@ -203,9 +203,7 @@ export async function scanFile(path: string, scanRoot?: string): Promise<Finding
 }
 
 /** Subscribe to scan events. Caller must invoke the returned function to unlisten. */
-export async function listenScanEvents(
-	handler: (event: ScanEvent) => void
-): Promise<UnlistenFn> {
+export async function listenScanEvents(handler: (event: ScanEvent) => void): Promise<UnlistenFn> {
 	return listen<ScanEvent>('scan:event', (e) => handler(e.payload));
 }
 
@@ -222,10 +220,7 @@ export interface ScanConfigOverride {
 	budget_total_tokens: number | null;
 }
 
-export async function runPipeline(
-	root: string,
-	config?: ScanConfigOverride
-): Promise<ScanResult> {
+export async function runPipeline(root: string, config?: ScanConfigOverride): Promise<ScanResult> {
 	return invoke<ScanResult>('run_pipeline', { root, config: config ?? null });
 }
 

@@ -342,8 +342,7 @@
 	async function exportTo(format: 'markdown' | 'sarif') {
 		if (!root) return;
 		try {
-			const content =
-				format === 'markdown' ? await exportMarkdown(root) : await exportSarif(root);
+			const content = format === 'markdown' ? await exportMarkdown(root) : await exportSarif(root);
 			const { save } = await import('@tauri-apps/plugin-dialog');
 			const ext = format === 'markdown' ? 'md' : 'sarif.json';
 			const stem = root.split(/[\\/]/).pop() || 'scan';
@@ -760,9 +759,7 @@
 
 	function scrollFindingIntoView(id: string) {
 		queueMicrotask(() => {
-			const el = document.querySelector<HTMLElement>(
-				`[data-finding-id="${CSS.escape(id)}"]`
-			);
+			const el = document.querySelector<HTMLElement>(`[data-finding-id="${CSS.escape(id)}"]`);
 			el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 		});
 	}
@@ -875,9 +872,9 @@
 		{/if}
 
 		{#if humanizedError}
-			<div class="border-destructive/40 bg-destructive/5 border-b px-4 py-2 text-xs">
+			<div class="border-b border-destructive/40 bg-destructive/5 px-4 py-2 text-xs">
 				<div class="flex items-baseline gap-2">
-					<span class="text-destructive font-medium">{humanizedError.title}</span>
+					<span class="font-medium text-destructive">{humanizedError.title}</span>
 					{#if humanizedError.detail}
 						<span class="text-destructive/80">— {humanizedError.detail}</span>
 					{/if}
@@ -886,12 +883,7 @@
 		{/if}
 
 		{#if showProgress}
-			<PipelineProgress
-				stageIndex={currentStageIndex}
-				{stage}
-				{rateLimitNotice}
-				{durations}
-			/>
+			<PipelineProgress stageIndex={currentStageIndex} {stage} {rateLimitNotice} {durations} />
 		{/if}
 
 		{#if showOnboarding}
@@ -943,10 +935,8 @@
 				/>
 
 				<section class="flex flex-col overflow-hidden">
-					<div class="border-border flex h-10 items-center justify-between border-b px-3">
-						<span
-							class="text-muted-foreground text-xs font-medium uppercase tracking-wide"
-						>
+					<div class="flex h-10 items-center justify-between border-b border-border px-3">
+						<span class="text-xs font-medium tracking-wide text-muted-foreground uppercase">
 							{selectedFinding
 								? 'Finding detail'
 								: selectedFileNodeIsStatus
@@ -956,7 +946,7 @@
 						{#if selectedFinding || selectedFileNodeIsStatus}
 							<button
 								type="button"
-								class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-6 items-center gap-1 rounded px-2 text-[0.6875rem] transition-colors"
+								class="inline-flex h-6 items-center gap-1 rounded px-2 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 								title="Back to summary (Esc)"
 								aria-label="Back to summary"
 								onclick={() => {

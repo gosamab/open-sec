@@ -306,13 +306,22 @@ pub struct ScanResult {
 /// `events`, when provided, receives a `ScanEvent` at each stage boundary
 /// (and once per file during detect). Send failures are silently dropped —
 /// the receiver going away does not abort the scan.
-#[instrument(skip(provider, config, events), fields(root = %root.display()))]
+///
+/// `previous`, when provided, lets the orchestrator skip work already done
+/// by a previous (interrupted) run. Ingest + triage are cheap so they
+/// always re-run; detect skips files whose `rel_path` already has cached
+/// findings or a cached error; verify skips findings already in
+/// `previous.verified`; patch skips findings already in `previous.patches`.
+/// Cached state is re-emitted via the event stream so the UI sees the full
+/// picture, not just the new work.
+#[instrument(skip(provider, config, events, previous), fields(root = %root.display()))]
 pub async fn run_scan(
     root: PathBuf,
     provider: Arc<dyn Provider>,
     config: &ScanConfig,
     events: EventSender,
     cancel: Option<Arc<AtomicBool>>,
+    previous: Option<ScanResult>,
 ) -> Result<ScanResult> {
     emit(&events, ScanEvent::Started { root: root.clone() });
 
@@ -459,11 +468,59 @@ pub async fn run_scan(
     }
 
     // ----- 3. Detect (parallel under Semaphore, streaming per-file) ---
+    // Cached rel_paths from a previous interrupted run — these are skipped
+    // entirely (no API call) and their findings/errors are re-emitted as
+    // events so the UI sees them.
+    let cached_detect_rels: std::collections::HashSet<String> = previous
+        .as_ref()
+        .map(|p| {
+            p.findings_by_file
+                .iter()
+                .map(|ff| ff.rel_path.clone())
+                .chain(p.detect_errors.iter().map(|e| e.rel_path.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut findings_by_file: Vec<FileFindings> = previous
+        .as_ref()
+        .map(|p| p.findings_by_file.clone())
+        .unwrap_or_default();
+    let mut detect_errors: Vec<DetectError> = previous
+        .as_ref()
+        .map(|p| p.detect_errors.clone())
+        .unwrap_or_default();
+    let mut all_findings: Vec<Finding> = findings_by_file
+        .iter()
+        .flat_map(|ff| ff.findings.iter().cloned())
+        .collect();
+    // Re-emit cached detect events so the frontend's findings map / file
+    // tree populate even for files we're not re-running.
+    for ff in &findings_by_file {
+        emit(
+            &events,
+            ScanEvent::DetectFileComplete {
+                rel_path: ff.rel_path.clone(),
+                findings: ff.findings.clone(),
+            },
+        );
+    }
+    for de in &detect_errors {
+        emit(
+            &events,
+            ScanEvent::DetectFileErrored {
+                rel_path: de.rel_path.clone(),
+                error: de.error.clone(),
+            },
+        );
+    }
     let detect_permits = Arc::new(Semaphore::new(config.detect_concurrency.max(1)));
     let mut set: JoinSet<(Candidate, Result<Vec<Finding>, String>)> = JoinSet::new();
     let detect_root = Arc::new(root.clone());
     let detect_model = Arc::new(config.detect_model.clone());
     for cand in to_detect {
+        if cached_detect_rels.contains(&cand.rel_path) {
+            continue;
+        }
         let permits = detect_permits.clone();
         let provider = provider.clone();
         let root = detect_root.clone();
@@ -484,9 +541,6 @@ pub async fn run_scan(
             (cand, result)
         });
     }
-    let mut findings_by_file: Vec<FileFindings> = Vec::new();
-    let mut all_findings: Vec<Finding> = Vec::new();
-    let mut detect_errors: Vec<DetectError> = Vec::new();
     while let Some(joined) = set.join_next().await {
         if let Ok((cand, outcome)) = joined {
             match outcome {
@@ -548,33 +602,62 @@ pub async fn run_scan(
     trip_budget_if_over(&stage_usage.total);
 
     // ----- 4. Verify --------------------------------------------------
-    let verified = if all_findings.is_empty() || is_cancelled() {
+    // Resume support: keep cached verdicts, only verify findings we don't
+    // already have a `VerifiedFinding` for.
+    let cached_verified_ids: std::collections::HashSet<String> = previous
+        .as_ref()
+        .map(|p| p.verified.iter().map(|v| v.finding.id.clone()).collect())
+        .unwrap_or_default();
+    let mut verified: Vec<VerifiedFinding> = previous
+        .as_ref()
+        .map(|p| p.verified.clone())
+        .unwrap_or_default();
+    let to_verify: Vec<Finding> = all_findings
+        .iter()
+        .filter(|f| !cached_verified_ids.contains(&f.id))
+        .cloned()
+        .collect();
+    if to_verify.is_empty() || is_cancelled() {
         if is_cancelled() {
             info!("scan cancelled after detect; skipping verify/patch");
         }
-        Vec::new()
     } else {
         let total = all_findings.len();
-        emit(&events, ScanEvent::VerifyProgress { done: 0, total });
+        let initial_done = cached_verified_ids.len();
+        emit(
+            &events,
+            ScanEvent::VerifyProgress {
+                done: initial_done,
+                total,
+            },
+        );
         let progress = {
             let events = events.clone();
-            let done = Arc::new(AtomicUsize::new(0));
+            let done = Arc::new(AtomicUsize::new(initial_done));
             let tick: verify::ProgressTick = Arc::new(move || {
                 let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                 let _ = events.send(ScanEvent::VerifyProgress { done: d, total });
             });
             Some(tick)
         };
-        verify_many(
-            all_findings,
+        let new_verified = verify_many(
+            to_verify,
             root.clone(),
             provider.clone(),
             &config.verify_model,
             config.verify_concurrency,
             progress,
         )
-        .await
-    };
+        .await;
+        verified.extend(new_verified);
+    }
+    // Stable order regardless of resume merge.
+    verified.sort_by(|a, b| {
+        a.finding
+            .file
+            .cmp(&b.finding.file)
+            .then_with(|| a.finding.line_start.cmp(&b.finding.line_start))
+    });
     let kept_or_hardening = verified
         .iter()
         .filter(|v| {
@@ -606,33 +689,63 @@ pub async fn run_scan(
     trip_budget_if_over(&stage_usage.total);
 
     // ----- 5. Patch ---------------------------------------------------
-    let patches = if kept_or_hardening == 0 || is_cancelled() {
+    // Resume support: keep cached patches, only ask the model for ones we
+    // don't already have. `propose_many`'s `should_patch` filter takes care
+    // of dropping any vuln that ultimately didn't earn a kept verdict.
+    let cached_patch_ids: std::collections::HashSet<String> = previous
+        .as_ref()
+        .map(|p| p.patches.iter().map(|x| x.finding_id.clone()).collect())
+        .unwrap_or_default();
+    let mut patches: Vec<Patch> = previous
+        .as_ref()
+        .map(|p| p.patches.clone())
+        .unwrap_or_default();
+    let to_propose: Vec<VerifiedFinding> = verified
+        .iter()
+        .filter(|v| !cached_patch_ids.contains(&v.finding.id))
+        .cloned()
+        .collect();
+    if kept_or_hardening == 0 || is_cancelled() {
         if is_cancelled() {
             info!("scan cancelled after verify; skipping patch");
         }
-        Vec::new()
     } else {
         let total = kept_or_hardening;
-        emit(&events, ScanEvent::PatchProgress { done: 0, total });
+        let initial_done = cached_patch_ids.len().min(total);
+        emit(
+            &events,
+            ScanEvent::PatchProgress {
+                done: initial_done,
+                total,
+            },
+        );
         let progress = {
             let events = events.clone();
-            let done = Arc::new(AtomicUsize::new(0));
+            let done = Arc::new(AtomicUsize::new(initial_done));
             let tick: verify::ProgressTick = Arc::new(move || {
                 let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                 let _ = events.send(ScanEvent::PatchProgress { done: d, total });
             });
             Some(tick)
         };
-        propose_many(
-            verified.clone(),
+        let new_patches = propose_many(
+            to_propose,
             root.clone(),
             provider,
             &config.patch_model,
             config.patch_concurrency,
             progress,
         )
-        .await
-    };
+        .await;
+        patches.extend(new_patches);
+    }
+    // Stable order regardless of resume merge.
+    patches.sort_by(|a, b| {
+        a.proposal
+            .file
+            .cmp(&b.proposal.file)
+            .then_with(|| a.proposal.anchor_line.cmp(&b.proposal.anchor_line))
+    });
     info!(count = patches.len(), "patch complete");
     emit(
         &events,

@@ -138,39 +138,32 @@ fn apply_event(partial: &mut ScanResult, event: &ScanEvent) {
     }
 }
 
-/// Run the full pipeline on a directory. Per-stage progress streams via the
-/// `scan:event` Tauri event and is incrementally persisted to SQLite as
-/// each event arrives, so a crash or abrupt close leaves the work-so-far
-/// on disk. `cancel_scan` makes this return the partial result with
-/// `status = cancelled`.
-#[tauri::command]
-#[instrument(skip(app, store, cancel), fields(root = %root))]
-pub async fn run_pipeline(
+/// Shared body for `run_pipeline` (fresh scan) and `resume_pipeline`
+/// (continuation of a previous interrupted scan). The only differences:
+/// `scan_id` is new vs reused, and `previous` is `None` vs `Some(loaded)`.
+/// Everything else — provider construction, incremental persistence,
+/// final status assignment — is identical.
+async fn drive_pipeline(
     app: AppHandle,
-    store: State<'_, Store>,
-    cancel: State<'_, CancelHandle>,
-    root: String,
-    config: Option<ScanConfig>,
+    store: &Store,
+    cancel: &CancelHandle,
+    scan_id: String,
+    started_at: i64,
+    root_path: PathBuf,
+    config: ScanConfig,
+    previous: Option<ScanResult>,
 ) -> Result<ScanResult, String> {
-    let root_path = PathBuf::from(&root);
-    if !root_path.is_dir() {
-        return Err(format!("not a directory: {root}"));
-    }
-
     let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
 
-    // Persistence identity for this scan — pinned upfront so every
-    // incremental save targets the same row via UPSERT.
-    let scan_id = new_scan_id();
-    let started_at = now_ms();
-    let root_clone = root_path.clone();
-
-    // Initial row so the launcher (and `load_scan`) can see the scan
-    // immediately, even before the first stage finishes.
-    let initial = ScanResult {
-        root: root_clone.clone(),
+    // The initial DB row mirrors whatever state we're starting from: an
+    // empty skeleton for a fresh scan, or the loaded partial for a resume.
+    // For a resume the UPSERT's `ON CONFLICT` clause is a no-op for fields
+    // we'd otherwise overwrite with identical values, but it pins
+    // `status='running'` again immediately.
+    let initial = previous.clone().unwrap_or_else(|| ScanResult {
+        root: root_path.clone(),
         ingest: WalkResult::default(),
         triaged: Vec::new(),
         findings_by_file: Vec::new(),
@@ -180,7 +173,7 @@ pub async fn run_pipeline(
         usage: StageUsage::default(),
         durations: StageDurations::default(),
         status: ScanStatus::Running,
-    };
+    });
     if let Err(e) = store.save_scan(&scan_id, started_at, &initial, ScanStatus::Running.as_str()) {
         warn!(error = %format!("{e:#}"), "failed to insert initial scan row");
     }
@@ -189,20 +182,10 @@ pub async fn run_pipeline(
 
     let app_for_events = app.clone();
     let scan_id_for_task = scan_id.clone();
+    let initial_for_task = initial.clone();
     let forward_task = tokio::spawn(async move {
         let store: State<Store> = app_for_events.state();
-        let mut partial = ScanResult {
-            root: root_clone,
-            ingest: WalkResult::default(),
-            triaged: Vec::new(),
-            findings_by_file: Vec::new(),
-            detect_errors: Vec::new(),
-            verified: Vec::new(),
-            patches: Vec::new(),
-            usage: StageUsage::default(),
-            durations: StageDurations::default(),
-            status: ScanStatus::Running,
-        };
+        let mut partial = initial_for_task;
         while let Some(event) = rx.recv().await {
             apply_event(&mut partial, &event);
             if let Err(e) = store.save_scan(
@@ -220,18 +203,24 @@ pub async fn run_pipeline(
     });
 
     let cancel_flag = cancel.install();
-    let config = config.unwrap_or_default();
-    let mut result = run_scan(root_path, provider, &config, tx, Some(cancel_flag.clone()))
-        .await
-        .map_err(|e| {
-            cancel.clear();
-            // Best-effort: flip the in-progress row to cancelled so it
-            // doesn't sit at "running" forever. The error path doesn't have
-            // a ScanResult; the existing partial state is whatever
-            // forward_task persisted last.
-            let _ = mark_scan_status(store.inner(), &scan_id, ScanStatus::Cancelled);
-            format!("{e:#}")
-        })?;
+    let mut result = run_scan(
+        root_path,
+        provider,
+        &config,
+        tx,
+        Some(cancel_flag.clone()),
+        previous,
+    )
+    .await
+    .map_err(|e| {
+        cancel.clear();
+        // Best-effort: flip the in-progress row to cancelled so it doesn't
+        // sit at "running" forever. The error path doesn't have a
+        // ScanResult; the existing partial state is whatever forward_task
+        // persisted last.
+        let _ = store.update_scan_status(&scan_id, ScanStatus::Cancelled.as_str());
+        format!("{e:#}")
+    })?;
 
     let _ = forward_task.await;
 
@@ -252,10 +241,75 @@ pub async fn run_pipeline(
     Ok(result)
 }
 
-/// Flip a scan row's status without touching its payload. Used on the
-/// run_pipeline error path to mark interrupted runs cancelled.
-fn mark_scan_status(store: &Store, scan_id: &str, status: ScanStatus) -> anyhow::Result<()> {
-    store.update_scan_status(scan_id, status.as_str())
+/// Run the full pipeline on a directory. Per-stage progress streams via the
+/// `scan:event` Tauri event and is incrementally persisted to SQLite as
+/// each event arrives, so a crash or abrupt close leaves the work-so-far
+/// on disk. `cancel_scan` makes this return the partial result with
+/// `status = cancelled`.
+#[tauri::command]
+#[instrument(skip(app, store, cancel), fields(root = %root))]
+pub async fn run_pipeline(
+    app: AppHandle,
+    store: State<'_, Store>,
+    cancel: State<'_, CancelHandle>,
+    root: String,
+    config: Option<ScanConfig>,
+) -> Result<ScanResult, String> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    drive_pipeline(
+        app,
+        store.inner(),
+        cancel.inner(),
+        new_scan_id(),
+        now_ms(),
+        root_path,
+        config.unwrap_or_default(),
+        None,
+    )
+    .await
+}
+
+/// Resume a previously-interrupted scan. Loads the partial `ScanResult`
+/// from SQLite and re-runs the orchestrator with `previous` set so each
+/// stage skips work that's already done — only files without cached
+/// findings get re-detected, only findings without verdicts get re-verified,
+/// only patchable findings without patches get re-proposed. Cached state
+/// is re-emitted on the event stream so the UI hydrates the full picture.
+#[tauri::command]
+#[instrument(skip(app, store, cancel), fields(scan_id = %scan_id))]
+pub async fn resume_pipeline(
+    app: AppHandle,
+    store: State<'_, Store>,
+    cancel: State<'_, CancelHandle>,
+    scan_id: String,
+    config: Option<ScanConfig>,
+) -> Result<ScanResult, String> {
+    let previous = store
+        .load_scan(&scan_id)
+        .map_err(|e| format!("load scan {scan_id}: {e:#}"))?;
+    let root_path = previous.root.clone();
+    if !root_path.is_dir() {
+        return Err(format!(
+            "scan root no longer exists: {}",
+            root_path.display()
+        ));
+    }
+    // started_at is preserved by save_scan's UPSERT — the row already
+    // exists, so the value we pass here goes unused.
+    drive_pipeline(
+        app,
+        store.inner(),
+        cancel.inner(),
+        scan_id,
+        now_ms(),
+        root_path,
+        config.unwrap_or_default(),
+        Some(previous),
+    )
+    .await
 }
 
 /// Flag the running scan for cancellation. The pipeline finishes its

@@ -66,6 +66,7 @@ pub fn run() {
             commands::set_anthropic_key,
             commands::scan_file,
             commands::run_pipeline,
+            commands::resume_pipeline,
             commands::cancel_scan,
             commands::get_excerpt,
             commands::apply_patch,

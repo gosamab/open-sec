@@ -31,6 +31,11 @@ class ScanState {
 	 *  total-duration counter in the progress bar; cleared back to `null`
 	 *  when the scan ends so we fall back to the orchestrator-reported value. */
 	scanStartedAt = $state<number | null>(null);
+	/** Highest pipeline-stage index whose `*_complete` event fired during
+	 *  this session (or that we can infer from hydrated data). `-1` means
+	 *  no stage has finished yet. The progress bar consults this on a
+	 *  cancelled scan so it doesn't mark every stage as done. */
+	lastCompletedStage = $state<number>(-1);
 
 	// Per-stage outputs (populated by scan:event stream)
 	walk = $state<ScanResult['ingest'] | null>(null);
@@ -46,6 +51,10 @@ class ScanState {
 	// projects since the last result?" comparisons).
 	scanResult = $state<ScanResult | null>(null);
 	resultRoot = $state<string | null>(null);
+	/** `scan_id` of the currently-hydrated past scan, when the user opened
+	 *  one from the launcher. Drives the Resume button — null when there's
+	 *  no persisted-and-resumable scan in view. */
+	loadedScanId = $state<string | null>(null);
 
 	// Patch regeneration history (per finding_id, ordered oldest → newest)
 	patchHistoryById = $state<Map<string, Patch[]>>(new Map());

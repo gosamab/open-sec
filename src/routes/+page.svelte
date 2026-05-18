@@ -24,6 +24,7 @@
 		hasAnthropicKey,
 		listenScanEvents,
 		loadScan,
+		resumePipeline,
 		runPipeline,
 		scanFile,
 		setTriage,
@@ -87,10 +88,12 @@
 					break;
 				case 'ingest_complete':
 					scan.walk = ev.walk;
+					scan.lastCompletedStage = Math.max(scan.lastCompletedStage, 0);
 					scan.stage = `triaging ${ev.walk.candidates.length} file(s)…`;
 					break;
 				case 'triage_complete':
 					scan.triaged = ev.triaged;
+					scan.lastCompletedStage = Math.max(scan.lastCompletedStage, 1);
 					const keepers = ev.triaged.filter((t) => t.result.priority !== 'skip').length;
 					scan.stage = keepers > 0 ? `detecting 0/${keepers} file(s)…` : 'detecting…';
 					break;
@@ -114,6 +117,7 @@
 					break;
 				}
 				case 'detect_complete':
+					scan.lastCompletedStage = Math.max(scan.lastCompletedStage, 2);
 					scan.stage = ev.total > 0 ? `verifying 0/${ev.total} finding(s)…` : 'verifying…';
 					break;
 				case 'verify_progress':
@@ -123,6 +127,7 @@
 					const next = new Map(scan.verdictById);
 					for (const v of ev.verified) next.set(v.finding.id, v.verdict);
 					scan.verdictById = next;
+					scan.lastCompletedStage = Math.max(scan.lastCompletedStage, 3);
 					scan.stage = 'proposing patches…';
 					break;
 				}
@@ -133,6 +138,7 @@
 					const next = new Map(scan.patchById);
 					for (const p of ev.patches) next.set(p.finding_id, p);
 					scan.patchById = next;
+					scan.lastCompletedStage = Math.max(scan.lastCompletedStage, 4);
 					scan.stage = 'done';
 					break;
 				}
@@ -253,8 +259,39 @@
 		ui.resetSelection();
 		triage.triageById = new Map();
 		triage.appliedPatchIds = new Set();
+		// Fresh scan invalidates whatever we'd previously hydrated from DB.
+		scan.loadedScanId = null;
+		scan.lastCompletedStage = -1;
 		try {
 			scan.scanResult = await runPipeline(scan.root, asScanConfig(settings.value));
+			scan.resultRoot = scan.root;
+			scan.stage = scan.scanResult.status === 'cancelled' ? 'cancelled' : 'done';
+			await reloadTriageForCurrentRoot();
+			await reloadAppliedForCurrentRoot();
+		} catch (e) {
+			scan.error = e instanceof Error ? e.message : String(e);
+			scan.stage = 'error';
+		} finally {
+			scan.scanning = false;
+			scan.cancelling = false;
+			scan.scanStartedAt = null;
+		}
+	}
+
+	/** Continue an interrupted past scan. The backend re-uses the same
+	 *  `scan_id` so the row keeps updating in place; UI hydrates with the
+	 *  partial state already on disk (via `loadScan`), then receives new
+	 *  detect/verify/patch events for the work that remained. */
+	async function resumeScan() {
+		if (!scan.loadedScanId || scan.scanning) return;
+		const scanId = scan.loadedScanId;
+		scan.scanning = true;
+		scan.cancelling = false;
+		scan.scanStartedAt = Date.now();
+		scan.error = null;
+		scan.stage = 'starting…';
+		try {
+			scan.scanResult = await resumePipeline(scanId, asScanConfig(settings.value));
 			scan.resultRoot = scan.root;
 			scan.stage = scan.scanResult.status === 'cancelled' ? 'cancelled' : 'done';
 			await reloadTriageForCurrentRoot();
@@ -324,6 +361,8 @@
 		scan.stage = 'idle';
 		scan.error = null;
 		scan.resultRoot = null;
+		scan.loadedScanId = null;
+		scan.lastCompletedStage = -1;
 		triage.triageById = new Map();
 		triage.dismissDraftFor = null;
 		triage.dismissReason = '';
@@ -366,6 +405,9 @@
 		try {
 			const r = await loadScan(group.latest_scan_id);
 			hydrateFromScanResult(r);
+			// Remember which scan we're viewing so the Resume button knows
+			// what to continue. Reset by `runScan` / `resetWorkspace`.
+			scan.loadedScanId = group.latest_scan_id;
 			await reloadTriageForCurrentRoot();
 			await reloadAppliedForCurrentRoot();
 		} catch (e) {
@@ -393,11 +435,46 @@
 		scan.rateLimitNotice = null;
 		scan.scanResult = r;
 		scan.resultRoot = r.root;
+		scan.lastCompletedStage = inferLastCompletedStage(r);
 		// A `running` row in the DB means the previous launch crashed or
 		// was killed mid-scan. Surface it like a cancellation — the user
 		// can re-scan; the partial findings are what we managed to persist
 		// before the interruption.
 		scan.stage = r.status === 'cancelled' || r.status === 'running' ? 'cancelled' : 'done';
+	}
+
+	/** Reconstruct "how far did this scan get?" from the persisted result.
+	 *  Used on hydrate so the progress bar of a cancelled/interrupted past
+	 *  scan shows the right number of checkmarks. Completed scans skip the
+	 *  inference — they're trivially at stage 4. */
+	function inferLastCompletedStage(r: ScanResult): number {
+		if (r.status === 'completed') return 4;
+		// patch fully done if every keeper has a patch row.
+		const patchableIds = new Set<string>();
+		for (const v of r.verified) {
+			const keep =
+				v.finding.kind === 'hardening' || (v.verdict && v.verdict.is_reachable && !!v.verdict.concrete_exploit);
+			if (keep) patchableIds.add(v.finding.id);
+		}
+		const patchedIds = new Set(r.patches.map((p) => p.finding_id));
+		if (patchableIds.size > 0 && [...patchableIds].every((id) => patchedIds.has(id))) return 4;
+		// verify fully done if every detected finding has a verified entry.
+		const totalFindings = r.findings_by_file.reduce((n, ff) => n + ff.findings.length, 0);
+		if (totalFindings > 0 && r.verified.length >= totalFindings) return 3;
+		// detect fully done if every triage keeper has either findings or an error row.
+		const keepers = r.triaged.filter((t) => t.result.priority !== 'skip');
+		const detectedRels = new Set([
+			...r.findings_by_file.map((ff) => ff.rel_path),
+			...(r.detect_errors ?? []).map((e) => e.rel_path)
+		]);
+		if (
+			keepers.length > 0 &&
+			keepers.every((t) => detectedRels.has(t.candidate.rel_path))
+		)
+			return 2;
+		if (r.triaged.length > 0 && r.ingest.candidates.length === r.triaged.length) return 1;
+		if (r.ingest.candidates.length > 0) return 0;
+		return -1;
 	}
 
 	function backToLauncher() {
@@ -800,6 +877,7 @@
 		snoozeDays={SNOOZE_DAYS}
 		onBack={backToLauncher}
 		onScan={runScan}
+		onResume={resumeScan}
 		onCancel={requestCancel}
 		onOpenSettings={() => (ui.settingsOpen = true)}
 		onExportMarkdown={() => exportTo('markdown')}

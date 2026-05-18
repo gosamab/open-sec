@@ -226,6 +226,17 @@ export async function runPipeline(root: string, config?: ScanConfigOverride): Pr
 	return invoke<ScanResult>('run_pipeline', { root, config: config ?? null });
 }
 
+/** Resume an interrupted scan. Re-uses the previous `scan_id` so incremental
+ *  saves continue to overwrite the same row, and per-stage work that's
+ *  already in the DB (detected files, verified findings, drafted patches)
+ *  is skipped. */
+export async function resumePipeline(
+	scanId: string,
+	config?: ScanConfigOverride
+): Promise<ScanResult> {
+	return invoke<ScanResult>('resume_pipeline', { scanId, config: config ?? null });
+}
+
 /** Flag the currently-running scan to cancel. Returns true if a scan was
  *  actively running. */
 export async function cancelScan(): Promise<boolean> {

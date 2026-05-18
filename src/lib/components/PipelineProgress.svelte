@@ -16,10 +16,30 @@
 		/** `Date.now()` taken when the scan started. Null when no scan is running
 		 *  (e.g. a past scan was hydrated); falls back to `durations.total_ms`. */
 		scanStartedAt: number | null;
+		/** Highest stage index whose `*_complete` event has fired. Used only
+		 *  when `stage === 'cancelled'` so we don't paint every step as done
+		 *  on an interrupted scan — `stageIndex` collapses to
+		 *  `PIPELINE_STAGES.length` for cancelled, which would otherwise tick
+		 *  every checkbox. `-1` means no stage finished. */
+		lastCompletedStage: number;
 	}
-	let { stageIndex, stage, rateLimitNotice, durations, scanning, scanStartedAt }: Props = $props();
+	let {
+		stageIndex,
+		stage,
+		rateLimitNotice,
+		durations,
+		scanning,
+		scanStartedAt,
+		lastCompletedStage
+	}: Props = $props();
 
 	function stateOf(i: number): 'done' | 'active' | 'pending' {
+		// Cancelled / interrupted: only stages whose `*_complete` event
+		// actually fired count as done; the one we stopped on, and any
+		// subsequent, are pending (no spinner).
+		if (stage === 'cancelled') {
+			return i <= lastCompletedStage ? 'done' : 'pending';
+		}
 		if (stageIndex === PIPELINE_STAGES.length) return 'done';
 		if (i < stageIndex) return 'done';
 		if (i === stageIndex) return 'active';

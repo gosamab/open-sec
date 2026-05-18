@@ -53,6 +53,7 @@
 		// Callbacks (per-route; can't live in a store)
 		onBack: () => void;
 		onScan: () => void;
+		onResume: () => void;
 		onCancel: () => void;
 		onOpenSettings: () => void;
 		onExportMarkdown: () => void;
@@ -103,6 +104,7 @@
 		snoozeDays,
 		onBack,
 		onScan,
+		onResume,
 		onCancel,
 		onOpenSettings,
 		onExportMarkdown,
@@ -134,8 +136,12 @@
 		scanResult={scan.scanResult}
 		resultRoot={scan.resultRoot}
 		stage={scan.stage}
+		canResume={!!scan.loadedScanId &&
+			scan.scanResult?.status !== 'completed' &&
+			!scan.scanning}
 		{onBack}
 		{onScan}
+		{onResume}
 		{onCancel}
 		{onOpenSettings}
 		{onExportMarkdown}
@@ -165,6 +171,7 @@
 			durations={scan.durations}
 			scanning={scan.scanning}
 			scanStartedAt={scan.scanStartedAt}
+			lastCompletedStage={scan.lastCompletedStage}
 		/>
 	{/if}
 

@@ -13,8 +13,10 @@
 		scanResult: ScanResult | null;
 		resultRoot: string | null;
 		stage: string;
+		canResume: boolean;
 		onBack: () => void;
 		onScan: () => void;
+		onResume: () => void;
 		onCancel: () => void;
 		onOpenSettings: () => void;
 		onExportMarkdown: () => void;
@@ -28,8 +30,10 @@
 		scanResult,
 		resultRoot,
 		stage,
+		canResume,
 		onBack,
 		onScan,
+		onResume,
 		onCancel,
 		onOpenSettings,
 		onExportMarkdown,
@@ -73,6 +77,17 @@
 			{cancelling ? 'Cancelling…' : 'Cancel'}
 		</Button>
 	{:else}
+		{#if canResume}
+			<Button
+				size="sm"
+				variant="outline"
+				onclick={onResume}
+				disabled={!keyConfigured}
+				title="Continue from where the previous scan left off — skips files/findings already done"
+			>
+				Resume
+			</Button>
+		{/if}
 		<Button size="sm" onclick={onScan} disabled={!root || !keyConfigured}>
 			{isScanComplete ? 'Re-scan' : 'Scan'}
 		</Button>

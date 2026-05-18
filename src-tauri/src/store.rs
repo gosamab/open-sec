@@ -23,13 +23,13 @@ use serde_json as json;
 use sha2::{Digest, Sha256};
 
 use crate::scanner::ingest::{Skipped, WalkResult};
-use crate::scanner::orchestrate::{FileFindings, ScanResult, StageUsage};
+use crate::scanner::orchestrate::{DetectError, FileFindings, ScanResult, StageUsage};
 use crate::scanner::patch::Patch;
 use crate::scanner::triage::TriagedFile;
 use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::Finding;
 
-const CURRENT_SCHEMA_VERSION: i32 = 2;
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS scans (
@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS applied_patches (
     applied_at  INTEGER NOT NULL,
     PRIMARY KEY (finding_id, root)
 );
+"#;
+
+const SCHEMA_V3: &str = r#"
+ALTER TABLE scans ADD COLUMN detect_errors_json TEXT NOT NULL DEFAULT '[]';
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +205,13 @@ impl Store {
             tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
-        // Future migrations chain here: if current < 3 { ... }
+        if current < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(SCHEMA_V3)?;
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+        }
+        // Future migrations chain here: if current < 4 { ... }
         let _ = CURRENT_SCHEMA_VERSION; // keep compiler honest about the constant being used
         Ok(())
     }
@@ -218,6 +228,7 @@ impl Store {
         let walk_json = json::to_string(&result.ingest)?;
         let triaged_json = json::to_string(&result.triaged)?;
         let usage_json = json::to_string(&result.usage)?;
+        let detect_errors_json = json::to_string(&result.detect_errors)?;
         let total = result.verified.len() as i64;
         let kept = result
             .verified
@@ -233,8 +244,8 @@ impl Store {
         tx.execute(
             "INSERT INTO scans (id, root, started_at, finished_at, status,
                  total_findings, kept_findings, hardening_findings,
-                 walk_json, triaged_json, usage_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 walk_json, triaged_json, usage_json, detect_errors_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 scan_id,
                 result.root.to_string_lossy(),
@@ -247,6 +258,7 @@ impl Store {
                 walk_json,
                 triaged_json,
                 usage_json,
+                detect_errors_json,
             ],
         )?;
 
@@ -346,9 +358,15 @@ impl Store {
     pub fn load_scan(&self, scan_id: &str) -> Result<ScanResult> {
         let conn = self.db();
 
-        let (root, walk_json, triaged_json, usage_json): (String, String, String, String) = conn
+        let (root, walk_json, triaged_json, usage_json, detect_errors_json): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
-                "SELECT root, walk_json, triaged_json, usage_json FROM scans WHERE id = ?1",
+                "SELECT root, walk_json, triaged_json, usage_json, detect_errors_json FROM scans WHERE id = ?1",
                 params![scan_id],
                 |row| {
                     Ok((
@@ -356,6 +374,7 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -365,6 +384,8 @@ impl Store {
         let ingest: WalkResult = json::from_str(&walk_json)?;
         let triaged: Vec<TriagedFile> = json::from_str(&triaged_json)?;
         let usage: StageUsage = json::from_str(&usage_json).unwrap_or_default();
+        let detect_errors: Vec<DetectError> =
+            json::from_str(&detect_errors_json).unwrap_or_default();
 
         let mut stmt = conn.prepare(
             "SELECT finding_id, rel_path, kind, severity, cwe, owasp, title, file,
@@ -448,6 +469,7 @@ impl Store {
             ingest,
             triaged,
             findings_by_file,
+            detect_errors,
             verified,
             patches,
             usage,
@@ -702,6 +724,7 @@ mod tests {
                 rel_path: "src/foo.ts".into(),
                 findings: vec![finding.clone()],
             }],
+            detect_errors: Vec::new(),
             verified: vec![VerifiedFinding {
                 finding,
                 verdict: Some(Verdict {

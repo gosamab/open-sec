@@ -143,11 +143,17 @@ export const EMPTY_STAGE_USAGE: StageUsage = {
 	total: EMPTY_USAGE
 };
 
+export interface DetectError {
+	rel_path: string;
+	error: string;
+}
+
 export interface ScanResult {
 	root: string;
 	ingest: WalkResult;
 	triaged: TriagedFile[];
 	findings_by_file: FileFindings[];
+	detect_errors: DetectError[];
 	verified: VerifiedFinding[];
 	patches: Patch[];
 	usage: StageUsage;

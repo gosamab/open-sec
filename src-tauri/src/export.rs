@@ -275,6 +275,7 @@ mod tests {
                 rel_path: "src/app.ts".into(),
                 findings: vec![f.clone()],
             }],
+            detect_errors: Vec::new(),
             verified: vec![VerifiedFinding {
                 finding: f,
                 verdict: Some(Verdict {

@@ -6,6 +6,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import Launcher from '$lib/components/Launcher.svelte';
 	import Settings from '$lib/components/Settings.svelte';
+	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import { renderMd, renderInlineMd } from '$lib/markdown';
 	import { asScanConfig, settings } from '$lib/settings.svelte';
 	import { highlightCode, highlightDiff } from '$lib/shiki.svelte';
@@ -455,6 +456,9 @@
 		const fbf = new Map<string, Finding[]>();
 		for (const ff of r.findings_by_file) fbf.set(ff.rel_path, ff.findings);
 		findingsByFile = fbf;
+		const errs = new Map<string, string>();
+		for (const e of r.detect_errors ?? []) errs.set(e.rel_path, e.error);
+		detectErrors = errs;
 		const vbi = new Map<string, Verdict | null>();
 		for (const v of r.verified) vbi.set(v.finding.id, v.verdict ?? null);
 		verdictById = vbi;
@@ -483,6 +487,88 @@
 		} finally {
 			savingKey = false;
 		}
+	}
+
+	/** Translate raw backend errors (anyhow chains, ProviderError display) into
+	 *  short, plain-English messages. Returns the original string as a fallback
+	 *  for anything we don't recognize. */
+	function humanizeError(raw: string): { title: string; detail?: string } {
+		const lower = raw.toLowerCase();
+
+		const rateMatch = raw.match(/retry after Some\((\d+)(?:\.\d+)?s\)/i);
+		if (rateMatch) {
+			return {
+				title: `Rate limited by Anthropic — retry in ${rateMatch[1]}s`,
+				detail: 'The API throttled us. Re-scan after the cooldown.'
+			};
+		}
+		if (lower.includes('rate limited')) {
+			return {
+				title: 'Rate limited by Anthropic',
+				detail: 'Wait a minute or two, then re-scan.'
+			};
+		}
+		if (lower.includes('authentication failed') || lower.includes('invalid api key')) {
+			return {
+				title: 'Invalid Anthropic API key',
+				detail: 'Update your key in Settings.'
+			};
+		}
+		if (lower.includes('overloaded')) {
+			return {
+				title: 'Anthropic is overloaded',
+				detail: 'The model is temporarily unavailable. Try again shortly.'
+			};
+		}
+		if (lower.includes('context') && (lower.includes('window') || lower.includes('length') || lower.includes('too long') || lower.includes('exceeds'))) {
+			return {
+				title: 'File is too large for the model',
+				detail: 'Detect skipped this file because its context exceeded the model limit.'
+			};
+		}
+		if (lower.includes('network error') || lower.includes('connection') || lower.includes('timed out') || lower.includes('timeout')) {
+			return {
+				title: 'Network error reaching Anthropic',
+				detail: 'Check your internet connection and try again.'
+			};
+		}
+		if (lower.includes('stream error')) {
+			return {
+				title: 'Connection dropped mid-response',
+				detail: 'The model started replying but the stream broke. Re-scan to retry.'
+			};
+		}
+		const serverMatch = raw.match(/server error \((\d+)\)/i);
+		if (serverMatch) {
+			return {
+				title: `Anthropic server error (${serverMatch[1]})`,
+				detail: 'Temporary upstream issue. Try again in a moment.'
+			};
+		}
+		if (lower.includes('decode error') || lower.includes('json') || lower.includes('parse')) {
+			return {
+				title: "Couldn't parse the model's response",
+				detail: 'Detect got a reply but it wasn\'t valid JSON. Re-scanning usually fixes this.'
+			};
+		}
+		if (lower.includes('iteration') || lower.includes('tool-use cap') || lower.includes('25 iterations')) {
+			return {
+				title: 'Detect agent gave up',
+				detail: 'The agent hit the 25-tool-call limit on this file without producing a verdict.'
+			};
+		}
+		if (lower.includes('cancelled')) {
+			return { title: 'Cancelled' };
+		}
+		if (lower.includes('bad request')) {
+			return {
+				title: 'Anthropic rejected the request',
+				detail: raw.replace(/^.*?bad request:\s*/i, '')
+			};
+		}
+		// Strip the layered anyhow prefix so the user sees the leaf error.
+		const stripped = raw.replace(/^detect failed:\s*/i, '').replace(/^anthropic generate call failed:\s*/i, '');
+		return { title: 'Detect failed', detail: stripped };
 	}
 
 	// ---------- derived --------------------------------------------------
@@ -552,12 +638,101 @@
 		}
 	}
 
-	function verdictStatus(f: Finding): 'pending' | 'verifying' | 'kept' | 'dropped' | 'hardening' {
-		if (f.kind === 'hardening') return 'hardening';
+	/** Single canonical status for a finding. See the state machine below.
+	 *
+	 *  Detect produces a Finding with kind = 'vuln' | 'hardening'.
+	 *    - vuln       → verifying → { open | dropped }   (pending if scan halts)
+	 *    - hardening  → open      (skips verify; detect already confirmed it)
+	 *
+	 *  User actions transition from any of the above to a terminal-ish state:
+	 *    dismissed | snoozed | accepted | patched.
+	 *
+	 *  Precedence when multiple apply (top wins):
+	 *    patched → dismissed → snoozed → accepted → (verifier outcome). */
+	type FindingStatus =
+		| 'verifying' // mid-flight verify (vuln only, scan running)
+		| 'pending'   // no verdict yet, scan not running (vuln only)
+		| 'open'      // confirmed real & unaddressed (vuln post-verify OR hardening)
+		| 'dropped'   // verifier said not exploitable (vuln only)
+		| 'snoozed'   // user deferred
+		| 'dismissed' // user dismissed
+		| 'accepted'  // user accepted as-is
+		| 'patched';  // patch applied to disk
+
+	function findingStatus(f: Finding): FindingStatus {
+		if (appliedPatchIds.has(f.id)) return 'patched';
+		const t = triageById.get(f.id);
+		if (t?.status === 'dismissed') return 'dismissed';
+		if (t?.status === 'snoozed') return 'snoozed';
+		if (t?.status === 'accepted') return 'accepted';
+		if (f.kind === 'hardening') return 'open';
 		if (!verdictById.has(f.id)) return scanning ? 'verifying' : 'pending';
 		const v = verdictById.get(f.id);
 		if (v === null || v === undefined) return 'pending';
-		return v.is_reachable && v.concrete_exploit ? 'kept' : 'dropped';
+		return v.is_reachable && v.concrete_exploit ? 'open' : 'dropped';
+	}
+
+	function statusClass(s: FindingStatus): string {
+		switch (s) {
+			case 'open':
+				return 'bg-rose-500/15 text-rose-700 dark:text-rose-300';
+			case 'patched':
+				return 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300';
+			case 'accepted':
+				return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300';
+			case 'snoozed':
+				return 'bg-violet-500/15 text-violet-700 dark:text-violet-300';
+			case 'dismissed':
+				return 'bg-zinc-400/15 text-zinc-500';
+			case 'dropped':
+				return 'bg-zinc-400/15 text-zinc-500 line-through';
+			case 'pending':
+				return 'bg-amber-500/15 text-amber-700 dark:text-amber-300';
+			case 'verifying':
+				return 'bg-amber-500/15 text-amber-700 dark:text-amber-300 animate-pulse';
+		}
+	}
+
+	function statusDotClass(s: FindingStatus): string {
+		switch (s) {
+			case 'open':
+				return 'bg-rose-500';
+			case 'patched':
+				return 'bg-emerald-500';
+			case 'accepted':
+				return 'bg-emerald-400';
+			case 'snoozed':
+				return 'bg-violet-500';
+			case 'dismissed':
+				return 'bg-zinc-400';
+			case 'dropped':
+				return 'bg-zinc-400';
+			case 'pending':
+			case 'verifying':
+				return 'bg-amber-500';
+		}
+	}
+
+	function statusLabel(s: FindingStatus): string {
+		if (s === 'verifying') return 'verifying…';
+		if (s === 'snoozed') {
+			// caller can pass the snooze-extended label via statusLabelFor()
+			return 'snoozed';
+		}
+		return s;
+	}
+
+	/** Label-with-detail for cases that need extra info (e.g. snooze date). */
+	function statusLabelFor(f: Finding): string {
+		const s = findingStatus(f);
+		if (s === 'snoozed') {
+			const t = triageById.get(f.id);
+			if (t?.snooze_until) {
+				const days = Math.max(0, Math.ceil((t.snooze_until - Date.now()) / 86_400_000));
+				return `snoozed · ${days}d`;
+			}
+		}
+		return statusLabel(s);
 	}
 
 	// All findings, flattened, with their file rel_path attached.
@@ -919,11 +1094,9 @@
 		return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
 	}
 
-	let totalTokensCompact = $derived.by(() => {
-		const t = usage.total;
-		const sum = t.input_tokens + t.output_tokens + t.cache_read_input_tokens;
-		return compactTokens(sum);
-	});
+	let totalTokens = $derived(
+		usage.total.input_tokens + usage.total.output_tokens + usage.total.cache_read_input_tokens
+	);
 
 	let usageRows = $derived.by(() => [
 		{ name: 'triage', u: usage.triage },
@@ -931,6 +1104,28 @@
 		{ name: 'verify', u: usage.verify },
 		{ name: 'patch', u: usage.patch }
 	]);
+
+	type StageSlot = { key: string; label: string; model: string | null };
+	const PIPELINE_STAGES: StageSlot[] = [
+		{ key: 'ingest', label: 'Ingest', model: null },
+		{ key: 'triage', label: 'Triage', model: 'Haiku' },
+		{ key: 'detect', label: 'Detect', model: 'Sonnet' },
+		{ key: 'verify', label: 'Verify', model: 'Opus' },
+		{ key: 'patch', label: 'Patch', model: 'Sonnet' }
+	];
+
+	/** Current stage as an index into PIPELINE_STAGES. -1 = not started,
+	 *  5 = all complete. */
+	let stageIndex = $derived.by(() => {
+		if (stage === 'idle' || stage === 'starting…') return -1;
+		if (stage === 'scanning…') return 0;
+		if (stage.startsWith('triaging')) return 1;
+		if (stage.startsWith('detecting')) return 2;
+		if (stage.startsWith('verifying')) return 3;
+		if (stage.startsWith('proposing')) return 4;
+		if (stage === 'done' || stage === 'cancelled') return 5;
+		return -1;
+	});
 
 	// ---------- triage actions ------------------------------------------
 	const SNOOZE_DAYS = 7;
@@ -995,34 +1190,6 @@
 		dismissReason = '';
 	}
 
-	function triageBadgeClass(s: TriageStatus): string {
-		switch (s) {
-			case 'accepted':
-				return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300';
-			case 'dismissed':
-				return 'bg-zinc-400/15 text-zinc-500';
-			case 'snoozed':
-				return 'bg-violet-500/15 text-violet-700 dark:text-violet-300';
-		}
-	}
-
-	function triageBadgeLabel(t: TriageRecord): string {
-		switch (t.status) {
-			case 'accepted':
-				return 'accepted';
-			case 'dismissed':
-				return 'dismissed';
-			case 'snoozed':
-				if (t.snooze_until) {
-					const days = Math.max(
-						0,
-						Math.ceil((t.snooze_until - Date.now()) / (24 * 60 * 60 * 1000))
-					);
-					return `snoozed · ${days}d`;
-				}
-				return 'snoozed';
-		}
-	}
 
 	function priorityChipLabel(p: Priority | null): string {
 		switch (p) {
@@ -1038,18 +1205,24 @@
 	}
 
 	let totals = $derived.by(() => {
-		let kept = 0;
-		let dropped = 0;
-		let hardening = 0;
-		let pending = 0;
-		for (const { f } of allFindings) {
-			const s = verdictStatus(f);
-			if (s === 'kept') kept++;
-			else if (s === 'dropped') dropped++;
-			else if (s === 'hardening') hardening++;
-			else pending++;
-		}
-		return { kept, dropped, hardening, pending, total: allFindings.length };
+		const c: Record<FindingStatus, number> = {
+			open: 0,
+			patched: 0,
+			accepted: 0,
+			snoozed: 0,
+			dismissed: 0,
+			dropped: 0,
+			pending: 0,
+			verifying: 0
+		};
+		for (const { f } of allFindings) c[findingStatus(f)]++;
+		return { ...c, total: allFindings.length };
+	});
+
+	let severityCounts = $derived.by(() => {
+		const c: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+		for (const { f } of allFindings) c[f.severity]++;
+		return c;
 	});
 
 	let triageFunnel = $derived.by(() => {
@@ -1142,7 +1315,7 @@
 		// Trigger re-highlight on theme change too (CSS handles the swap, but
 		// we want the effect to be reactive on theme so any future per-theme
 		// processing kicks in).
-		void theme.value;
+		void theme.resolved;
 		highlightDiff(diff)
 			.then((html) => {
 				if (!cancelled) diffHtml = html;
@@ -1252,30 +1425,21 @@
 					<div class="border-border bg-popover text-popover-foreground absolute right-0 top-full z-10 mt-1 w-48 overflow-hidden rounded-md border shadow-md" role="menu">
 						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportTo('markdown'); }}>
 							<div class="font-medium">Markdown</div>
-							<div class="text-muted-foreground">Readable .md report</div>
+							<div class="text-muted-foreground">.md report</div>
 						</button>
 						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportPdf(); }}>
 							<div class="font-medium">PDF</div>
-							<div class="text-muted-foreground">Print-formatted, via system dialog</div>
+							<div class="text-muted-foreground">Print to file</div>
 						</button>
 						<button type="button" role="menuitem" class="hover:bg-muted block w-full px-3 py-2 text-left text-xs" onclick={() => { exportMenuOpen = false; exportTo('sarif'); }}>
 							<div class="font-medium">SARIF</div>
-							<div class="text-muted-foreground">v2.1.0 for CI / code-scanning</div>
+							<div class="text-muted-foreground">For CI</div>
 						</button>
 					</div>
 				{/if}
 			</div>
 		{/if}
-		<div class="text-muted-foreground flex items-center gap-3 text-xs">
-			{#if usage.total.input_tokens + usage.total.output_tokens > 0}
-				<span
-					class="font-mono"
-					title="input: {usage.total.input_tokens.toLocaleString()} · output: {usage.total.output_tokens.toLocaleString()} · cache read: {usage.total.cache_read_input_tokens.toLocaleString()}"
-				>
-					{totalTokensCompact} tok
-				</span>
-			{/if}
-			<span class="font-mono">{stage}</span>
+		<div class="text-muted-foreground flex items-center gap-2 text-xs">
 			<button
 				type="button"
 				onclick={() => (settingsOpen = true)}
@@ -1298,53 +1462,7 @@
 					<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
 				</svg>
 			</button>
-			<button
-				type="button"
-				onclick={() => theme.cycle()}
-				class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
-				title={theme.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-				aria-label="Toggle theme"
-			>
-				{#if theme.value === 'dark'}
-					<!-- Sun icon -->
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						width="14"
-						height="14"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					>
-						<circle cx="12" cy="12" r="4" />
-						<path d="M12 2v2" />
-						<path d="M12 20v2" />
-						<path d="m4.93 4.93 1.41 1.41" />
-						<path d="m17.66 17.66 1.41 1.41" />
-						<path d="M2 12h2" />
-						<path d="M20 12h2" />
-						<path d="m6.34 17.66-1.41 1.41" />
-						<path d="m19.07 4.93-1.41 1.41" />
-					</svg>
-				{:else}
-					<!-- Moon icon -->
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						width="14"
-						height="14"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					>
-						<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-					</svg>
-				{/if}
-			</button>
+			<ThemeToggle />
 		</div>
 	</header>
 
@@ -1367,12 +1485,147 @@
 	{/if}
 
 	{#if error}
+		{@const h = humanizeError(error)}
 		<div class="border-destructive/40 bg-destructive/5 border-b px-4 py-2 text-xs">
-			<span class="text-destructive font-medium">Error:</span>
-			<span class="text-destructive ml-2 font-mono">{error}</span>
+			<div class="flex items-baseline gap-2">
+				<span class="text-destructive font-medium">{h.title}</span>
+				{#if h.detail}
+					<span class="text-destructive/80">— {h.detail}</span>
+				{/if}
+			</div>
 		</div>
 	{/if}
 
+	{#if scanning || scanResult || stage === 'done' || stage === 'cancelled'}
+		<div class="border-border bg-muted/20 flex items-center gap-3 border-b px-4 py-2">
+			<ol class="flex flex-1 items-center gap-1">
+				{#each PIPELINE_STAGES as s, i (s.key)}
+					{@const state = stageIndex === 5
+						? 'done'
+						: i < stageIndex
+							? 'done'
+							: i === stageIndex
+								? 'active'
+								: 'pending'}
+					<li class="flex items-center gap-1">
+						<div class="flex items-center gap-1.5 rounded px-2 py-1 {state === 'active' ? 'bg-foreground text-background' : state === 'done' ? 'text-foreground' : 'text-muted-foreground/60'}">
+							<span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+								{#if state === 'done'}
+									<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+								{:else if state === 'active'}
+									<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>
+								{:else}
+									<span class="font-mono text-[0.625rem]">{i + 1}</span>
+								{/if}
+							</span>
+							<span class="text-xs font-medium">{s.label}</span>
+						</div>
+						{#if i < PIPELINE_STAGES.length - 1}
+							<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground/30"><path d="m9 18 6-6-6-6"/></svg>
+						{/if}
+					</li>
+				{/each}
+			</ol>
+			<span class="text-muted-foreground shrink-0 font-mono text-xs">{stage}</span>
+		</div>
+	{/if}
+
+	{#if !scanResult && !scanning && stage === 'idle'}
+		<!-- Onboarding: shown after a folder is picked, before the first scan -->
+		<div class="flex flex-1 items-center justify-center overflow-y-auto px-8 py-10">
+			<div class="flex w-full max-w-3xl flex-col gap-6">
+				<div class="space-y-1.5">
+					<h2 class="text-xl font-semibold tracking-tight">Ready to scan</h2>
+					<p class="text-muted-foreground text-sm">
+						An AI pipeline reads this folder and drafts patches. Nothing touches disk until you approve.
+					</p>
+				</div>
+
+				<div class="border-border bg-muted/30 flex items-center gap-3 rounded-md border px-3.5 py-2.5">
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						class="text-muted-foreground shrink-0"
+					>
+						<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+					</svg>
+					<span class="truncate font-mono text-xs" title={root}>{root || '—'}</span>
+				</div>
+
+				<section class="space-y-2.5">
+					<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+						Pipeline
+					</h3>
+					<div class="flex items-stretch gap-1.5">
+						{#each [
+							{ n: '1', name: 'Ingest', model: null, desc: 'Walk & filter' },
+							{ n: '2', name: 'Triage', model: 'Haiku', desc: 'Prioritize' },
+							{ n: '3', name: 'Detect', model: 'Sonnet', desc: 'Find issues' },
+							{ n: '4', name: 'Verify', model: 'Opus', desc: 'Confirm exploits' },
+							{ n: '5', name: 'Patch', model: 'Sonnet', desc: 'Draft fixes' }
+						] as step, i (step.n)}
+							<div class="border-border bg-background flex flex-1 flex-col gap-1 rounded-md border px-3 py-2.5">
+								<div class="flex items-center justify-between">
+									<span class="text-muted-foreground/70 font-mono text-[0.625rem]">{step.n}</span>
+									{#if step.model}
+										<span class="text-muted-foreground/70 font-mono text-[0.5625rem] uppercase tracking-wider">
+											{step.model}
+										</span>
+									{/if}
+								</div>
+								<div class="text-sm font-medium">{step.name}</div>
+								<div class="text-muted-foreground text-[0.6875rem]">{step.desc}</div>
+							</div>
+							{#if i < 4}
+								<div class="text-muted-foreground/50 flex items-center">
+									<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+								</div>
+							{/if}
+						{/each}
+					</div>
+				</section>
+
+				<div class="space-y-2">
+					<Button
+						size="lg"
+						onclick={runScan}
+						disabled={!root || !keyConfigured}
+						class="w-full"
+					>
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							width="14"
+							height="14"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							class="mr-2"
+						>
+							<polygon points="6 3 20 12 6 21 6 3" />
+						</svg>
+						Start scan
+					</Button>
+					<p class="text-muted-foreground text-center text-xs">
+						{#if !keyConfigured}
+							Add your Anthropic API key above to enable scanning.
+						{:else}
+							Typically a few cents and under a minute for a small project.
+						{/if}
+					</p>
+				</div>
+			</div>
+		</div>
+	{:else}
 	<!-- Three panes -->
 	<div class="grid flex-1 grid-cols-[260px_minmax(320px,1fr)_minmax(400px,1.4fr)] overflow-hidden">
 		<!-- Left: file tree -->
@@ -1556,15 +1809,13 @@
 			</div>
 
 			{#if triaged.length > 0}
-				<div class="border-border space-y-1 border-t px-3 py-2 text-xs">
-					<div class="text-muted-foreground text-[0.625rem] uppercase tracking-wide">
-						Triage
-					</div>
-					<div class="flex gap-2">
-						<Badge class={priorityClass('high')}>{triageFunnel.high} high</Badge>
-						<Badge class={priorityClass('normal')}>{triageFunnel.normal}</Badge>
-						<Badge class={priorityClass('low')}>{triageFunnel.low}</Badge>
-						<Badge class={priorityClass('skip')}>{triageFunnel.skip} skip</Badge>
+				<div class="border-border text-muted-foreground border-t px-3 py-2 text-[0.6875rem] leading-relaxed">
+					<span class="font-medium">Priority</span>
+					<div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono">
+						<span><span class="text-orange-600 dark:text-orange-300">H</span> high</span>
+						<span><span class="text-zinc-600 dark:text-zinc-300">N</span> normal</span>
+						<span><span class="text-blue-600 dark:text-blue-300">L</span> low</span>
+						<span><span class="text-zinc-500 italic">S</span> skip</span>
 					</div>
 				</div>
 			{/if}
@@ -1652,14 +1903,47 @@
 							{/if}
 						</div>
 					{:else if stage === 'done' && allFindings.length === 0}
-						<div class="space-y-2 px-4 py-8 text-center text-sm">
-							<div class="text-2xl">✓</div>
-							<p class="font-medium">Clean scan</p>
-							<p class="text-muted-foreground text-xs leading-relaxed">
-								No vulnerabilities found in
-								{walk?.candidates.length ?? 0} file(s).
-							</p>
-						</div>
+						{#if detectErrors.size > 0}
+							<div class="space-y-3 px-4 py-6 text-sm">
+								<div class="space-y-2 text-center">
+									<div class="text-destructive text-2xl leading-none">!</div>
+									<p class="font-medium">Scan finished with errors</p>
+									<p class="text-muted-foreground text-xs leading-relaxed">
+										{detectErrors.size} of {walk?.candidates.length ?? 0} file(s) couldn't be scanned. No findings produced.
+									</p>
+								</div>
+								<ul class="border-border max-h-72 space-y-1 overflow-y-auto rounded-md border p-1">
+									{#each Array.from(detectErrors) as [rel, msg] (rel)}
+										{@const h = humanizeError(msg)}
+										<li class="hover:bg-muted/40 rounded px-2 py-2">
+											<button
+												type="button"
+												class="text-primary block w-full text-left text-xs hover:underline"
+												onclick={() => selectFile(rel)}
+												title={rel}
+											>
+												<span class="font-mono">{rel}</span>
+											</button>
+											<div class="mt-1 text-xs">{h.title}</div>
+											{#if h.detail}
+												<div class="text-muted-foreground mt-0.5 text-[0.6875rem] leading-relaxed">
+													{h.detail}
+												</div>
+											{/if}
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{:else}
+							<div class="space-y-2 px-4 py-8 text-center text-sm">
+								<div class="text-2xl">✓</div>
+								<p class="font-medium">Clean scan</p>
+								<p class="text-muted-foreground text-xs leading-relaxed">
+									No vulnerabilities found in
+									{walk?.candidates.length ?? 0} file(s).
+								</p>
+							</div>
+						{/if}
 					{:else if stage === 'done' && selectedFile}
 						<p class="text-muted-foreground px-4 py-4 text-xs">
 							No findings in <span class="font-mono">{selectedFile}</span>.
@@ -1671,43 +1955,23 @@
 					{/if}
 				{:else}
 					{#each visibleFindings as { f, rel } (f.id)}
-						{@const status = verdictStatus(f)}
-						{@const triage = triageById.get(f.id)}
+						{@const status = findingStatus(f)}
 						<button
 							type="button"
 							data-finding-id={f.id}
-							class="hover:bg-muted/40 border-border block w-full border-b px-4 py-3 text-left {selectedFindingId === f.id ? 'bg-muted/60' : ''} {triage?.status === 'dismissed' ? 'opacity-60' : ''}"
+							class="hover:bg-muted/40 border-border block w-full border-b px-4 py-3 text-left {selectedFindingId === f.id ? 'bg-muted/60' : ''} {status === 'dismissed' || status === 'dropped' ? 'opacity-60' : ''}"
 							onclick={() => selectFinding(f.id)}
 						>
 							<div class="flex items-start justify-between gap-2">
 								<div class="flex-1 space-y-1">
 									<div class="flex flex-wrap items-center gap-1.5">
 										<Badge class={severityClass(f.severity)}>{f.severity}</Badge>
+										<Badge class={statusClass(status)}>{statusLabelFor(f)}</Badge>
 										<span class="text-muted-foreground font-mono text-xs">{f.cwe}</span>
 										{#if f.owasp}
 											<span class="text-muted-foreground font-mono text-xs">
 												· {f.owasp}
 											</span>
-										{/if}
-										{#if status === 'verifying'}
-											<span class="text-muted-foreground animate-pulse text-xs">
-												verifying…
-											</span>
-										{:else if status === 'kept'}
-											<Badge class="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
-												kept
-											</Badge>
-										{:else if status === 'dropped'}
-											<Badge class="bg-zinc-400/15 text-zinc-500 line-through">dropped</Badge>
-										{:else if status === 'hardening'}
-											<Badge class="bg-sky-500/15 text-sky-700 dark:text-sky-300">
-												hardening
-											</Badge>
-										{/if}
-										{#if triage}
-											<Badge class={triageBadgeClass(triage.status)}>
-												{triageBadgeLabel(triage)}
-											</Badge>
 										{/if}
 									</div>
 									<div class="text-sm font-medium">{f.title}</div>
@@ -1745,6 +2009,9 @@
 								<Badge class={severityClass(selectedFinding.severity)}>
 									{selectedFinding.severity}
 								</Badge>
+								<Badge class={statusClass(findingStatus(selectedFinding))}>
+									{statusLabelFor(selectedFinding)}
+								</Badge>
 								<Badge variant="outline">{selectedFinding.kind}</Badge>
 								<span class="text-muted-foreground font-mono text-xs">
 									{selectedFinding.cwe}
@@ -1753,10 +2020,6 @@
 									<span class="text-muted-foreground font-mono text-xs">
 										· OWASP {selectedFinding.owasp}
 									</span>
-								{/if}
-								{#if triageById.has(selectedFinding.id)}
-									{@const t = triageById.get(selectedFinding.id)!}
-									<Badge class={triageBadgeClass(t.status)}>{triageBadgeLabel(t)}</Badge>
 								{/if}
 							</div>
 							<h2 class="text-base font-semibold leading-snug tracking-tight">
@@ -2120,15 +2383,25 @@
 								</p>
 							</section>
 						{:else if selectedFileNode.status === 'errored'}
-							<section class="space-y-2">
-								<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
-									Error
-								</h3>
-								<pre class="bg-muted/40 border-border overflow-auto whitespace-pre-wrap rounded-md border p-3 font-mono text-xs">{selectedFileNode.detectError ?? '(no error message)'}</pre>
-								<p class="text-muted-foreground text-xs leading-relaxed">
-									The detect agent could not produce a JSON result for this file
-									(model error, parse failure, or 25-iteration tool-use cap).
-								</p>
+							{@const h = humanizeError(selectedFileNode.detectError ?? '')}
+							<section class="space-y-3">
+								<div class="space-y-1">
+									<h3 class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+										Error
+									</h3>
+									<p class="text-sm font-medium">{h.title}</p>
+									{#if h.detail}
+										<p class="text-muted-foreground text-xs leading-relaxed">{h.detail}</p>
+									{/if}
+								</div>
+								{#if selectedFileNode.detectError}
+									<details class="text-xs">
+										<summary class="text-muted-foreground hover:text-foreground cursor-pointer">
+											Show technical details
+										</summary>
+										<pre class="bg-muted/40 border-border mt-2 overflow-auto whitespace-pre-wrap rounded-md border p-3 font-mono text-[0.6875rem]">{selectedFileNode.detectError}</pre>
+									</details>
+								{/if}
 							</section>
 						{/if}
 					</article>
@@ -2156,88 +2429,150 @@
 								{/if}
 							</div>
 						{/if}
-						<div>
-							<h2 class="mb-2 text-base font-medium">Scan summary</h2>
-							<dl class="text-sm">
-								<div class="grid grid-cols-[140px_1fr] py-0.5">
-									<dt class="text-muted-foreground">Root</dt>
-									<dd class="truncate font-mono text-xs">{root || '—'}</dd>
-								</div>
-								<div class="grid grid-cols-[140px_1fr] py-0.5">
-									<dt class="text-muted-foreground">Status</dt>
-									<dd>{stage}</dd>
-								</div>
-								{#if walk}
-									<div class="grid grid-cols-[140px_1fr] py-0.5">
-										<dt class="text-muted-foreground">Ingest</dt>
-										<dd>
-											{walk.candidates.length} candidate(s), {walk.skipped.length} skipped
-										</dd>
-									</div>
-								{/if}
-								{#if triaged.length > 0}
-									<div class="grid grid-cols-[140px_1fr] py-0.5">
-										<dt class="text-muted-foreground">Triage</dt>
-										<dd>
-											{triageFunnel.high} high / {triageFunnel.normal} normal / {triageFunnel.low}
-											low / {triageFunnel.skip} skip
-										</dd>
-									</div>
-								{/if}
-								<div class="grid grid-cols-[140px_1fr] py-0.5">
-									<dt class="text-muted-foreground">Findings</dt>
-									<dd>
-										{totals.kept} kept / {totals.dropped} dropped / {totals.hardening} hardening
-										{#if totals.pending > 0}
-											· {totals.pending} pending
-										{/if}
-									</dd>
-								</div>
-								<div class="grid grid-cols-[140px_1fr] py-0.5">
-									<dt class="text-muted-foreground">Patches</dt>
-									<dd>{patchById.size}</dd>
-								</div>
+						<div class="space-y-4">
+							<div class="space-y-1">
+								<h2 class="text-base font-medium">Scan summary</h2>
+								<p class="text-muted-foreground break-all font-mono text-xs" title={root}>
+									{root || '—'}
+								</p>
+							</div>
+
+							<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
+								<dt class="text-muted-foreground py-0.5">Files scanned</dt>
+								<dd class="py-0.5 text-right font-mono tabular-nums">
+									{walk?.candidates.length ?? 0}{#if walk && walk.skipped.length > 0}<span class="text-muted-foreground/70"> · {walk.skipped.length} skipped</span>{/if}
+								</dd>
+								<dt class="text-muted-foreground py-0.5">Patches drafted</dt>
+								<dd class="py-0.5 text-right font-mono tabular-nums">{patchById.size}</dd>
 							</dl>
+
+							{#if allFindings.length > 0}
+								<div class="space-y-1.5">
+									<div class="flex items-baseline justify-between gap-2">
+										<div class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+											Severity
+										</div>
+										<div class="text-muted-foreground/70 text-[0.625rem]">
+											{allFindings.length} total
+										</div>
+									</div>
+									<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
+										{#each [
+											{ key: 'critical' as Severity, label: 'Critical' },
+											{ key: 'high' as Severity, label: 'High' },
+											{ key: 'medium' as Severity, label: 'Medium' },
+											{ key: 'low' as Severity, label: 'Low' }
+										] as row (row.key)}
+											{@const n = severityCounts[row.key]}
+											<dt class="flex items-center gap-2 py-0.5 {n === 0 ? 'text-muted-foreground/50' : ''}">
+												<span class="h-2 w-2 shrink-0 rounded-full {severityDot(row.key)} {n === 0 ? 'opacity-30' : ''}"></span>
+												{row.label}
+											</dt>
+											<dd class="py-0.5 text-right font-mono tabular-nums {n === 0 ? 'text-muted-foreground/50' : ''}">
+												{n}
+											</dd>
+										{/each}
+										{#if severityCounts.info > 0}
+											<dt class="flex items-center gap-2 py-0.5">
+												<span class="h-2 w-2 shrink-0 rounded-full {severityDot('info')}"></span>
+												Info
+											</dt>
+											<dd class="py-0.5 text-right font-mono tabular-nums">{severityCounts.info}</dd>
+										{/if}
+									</dl>
+								</div>
+							{/if}
+
+							<div class="space-y-1.5">
+								<div class="flex items-baseline justify-between gap-2">
+									<div class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider">
+										Status
+									</div>
+									<div class="text-muted-foreground/70 text-[0.625rem]">
+										one per finding
+									</div>
+								</div>
+								<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
+									{#each [
+										{ key: 'open' as FindingStatus, label: 'Open' },
+										{ key: 'patched' as FindingStatus, label: 'Patched' },
+										{ key: 'accepted' as FindingStatus, label: 'Accepted' },
+										{ key: 'snoozed' as FindingStatus, label: 'Snoozed' },
+										{ key: 'dismissed' as FindingStatus, label: 'Dismissed' },
+										{ key: 'dropped' as FindingStatus, label: 'Dropped' },
+										{ key: 'pending' as FindingStatus, label: 'Pending' },
+										{ key: 'verifying' as FindingStatus, label: 'Verifying' }
+									] as row (row.key)}
+										{@const n = totals[row.key]}
+										{#if n > 0 || row.key === 'open' || row.key === 'patched'}
+											<dt class="flex items-center gap-2 py-0.5 {n === 0 ? 'text-muted-foreground/50' : ''}">
+												<span class="h-2 w-2 shrink-0 rounded-full {statusDotClass(row.key)} {n === 0 ? 'opacity-30' : ''}"></span>
+												{row.label}
+											</dt>
+											<dd class="py-0.5 text-right font-mono tabular-nums {n === 0 ? 'text-muted-foreground/50' : ''}">
+												{n}
+											</dd>
+										{/if}
+									{/each}
+								</dl>
+							</div>
 						</div>
 
-						{#if usage.total.input_tokens + usage.total.output_tokens > 0}
-							<div>
-								<h3
-									class="text-muted-foreground mb-2 text-[0.625rem] font-medium uppercase tracking-wider"
-								>
-									Token usage
-								</h3>
-								<table class="w-full text-xs">
-									<thead>
-										<tr class="text-muted-foreground border-border border-b">
-											<th class="text-left font-normal">stage</th>
-											<th class="text-right font-normal">in</th>
-											<th class="text-right font-normal">out</th>
-											<th class="text-right font-normal">cache rd</th>
-										</tr>
-									</thead>
-									<tbody class="font-mono">
-										{#each usageRows as row (row.name)}
-											<tr class="border-border/40 border-b">
-												<td class="py-0.5">{row.name}</td>
-												<td class="text-right">{row.u.input_tokens.toLocaleString()}</td>
-												<td class="text-right">{row.u.output_tokens.toLocaleString()}</td>
-												<td class="text-muted-foreground text-right">
-													{row.u.cache_read_input_tokens.toLocaleString()}
-												</td>
+						{#if totalTokens > 0}
+							<details class="group border-border overflow-hidden rounded-md border">
+								<summary class="hover:bg-muted/30 flex cursor-pointer items-center justify-between px-3 py-2 [&::-webkit-details-marker]:hidden">
+									<div class="flex items-center gap-2">
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											width="10"
+											height="10"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2.5"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											class="text-muted-foreground transition-transform group-open:rotate-90"
+										>
+											<path d="m9 18 6-6-6-6" />
+										</svg>
+										<span class="text-xs font-medium">Token usage</span>
+									</div>
+									<span class="text-muted-foreground font-mono text-xs">
+										{compactTokens(totalTokens)}
+									</span>
+								</summary>
+								<div class="border-border bg-muted/10 border-t">
+									<table class="w-full text-xs">
+										<thead>
+											<tr class="text-muted-foreground/70 border-border/60 border-b text-[0.625rem] uppercase tracking-wider">
+												<th class="px-3 py-1.5 text-left font-medium">Stage</th>
+												<th class="px-2 py-1.5 text-right font-medium">In</th>
+												<th class="px-2 py-1.5 text-right font-medium">Out</th>
+												<th class="px-3 py-1.5 text-right font-medium">Cache</th>
 											</tr>
-										{/each}
-										<tr class="font-semibold">
-											<td class="py-1">total</td>
-											<td class="text-right">{usage.total.input_tokens.toLocaleString()}</td>
-											<td class="text-right">{usage.total.output_tokens.toLocaleString()}</td>
-											<td class="text-muted-foreground text-right">
-												{usage.total.cache_read_input_tokens.toLocaleString()}
-											</td>
-										</tr>
-									</tbody>
-								</table>
-							</div>
+										</thead>
+										<tbody class="font-mono">
+											{#each usageRows as row (row.name)}
+												<tr class="border-border/30 border-b last:border-b-0">
+													<td class="px-3 py-1">{row.name}</td>
+													<td class="px-2 py-1 text-right tabular-nums">{row.u.input_tokens.toLocaleString()}</td>
+													<td class="px-2 py-1 text-right tabular-nums">{row.u.output_tokens.toLocaleString()}</td>
+													<td class="text-muted-foreground px-3 py-1 text-right tabular-nums">{row.u.cache_read_input_tokens.toLocaleString()}</td>
+												</tr>
+											{/each}
+										</tbody>
+										<tfoot>
+											<tr class="border-border/60 bg-muted/30 border-t font-semibold">
+												<td class="px-3 py-1.5">Total</td>
+												<td class="px-2 py-1.5 text-right tabular-nums">{usage.total.input_tokens.toLocaleString()}</td>
+												<td class="px-2 py-1.5 text-right tabular-nums">{usage.total.output_tokens.toLocaleString()}</td>
+												<td class="text-muted-foreground px-3 py-1.5 text-right tabular-nums">{usage.total.cache_read_input_tokens.toLocaleString()}</td>
+											</tr>
+										</tfoot>
+									</table>
+								</div>
+							</details>
 						{/if}
 
 						{#if walk && walk.skipped.length > 0}
@@ -2270,6 +2605,7 @@
 			</div>
 		</section>
 	</div>
+	{/if}
 </div>
 {/if}
 

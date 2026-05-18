@@ -140,6 +140,15 @@ pub struct FileFindings {
     pub findings: Vec<Finding>,
 }
 
+/// A file the detect stage failed on. Carried through so re-opened past
+/// scans can show "scan finished with errors" instead of pretending the
+/// scan was clean.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectError {
+    pub rel_path: String,
+    pub error: String,
+}
+
 /// Everything the pipeline produced. Intermediate stages are retained so
 /// the UI can render the triage funnel, verify decisions, etc., without
 /// re-running anything.
@@ -149,6 +158,8 @@ pub struct ScanResult {
     pub ingest: WalkResult,
     pub triaged: Vec<TriagedFile>,
     pub findings_by_file: Vec<FileFindings>,
+    #[serde(default)]
+    pub detect_errors: Vec<DetectError>,
     pub verified: Vec<VerifiedFinding>,
     pub patches: Vec<Patch>,
     pub usage: StageUsage,
@@ -224,6 +235,7 @@ pub async fn run_scan(
             ingest,
             triaged: Vec::new(),
             findings_by_file: Vec::new(),
+            detect_errors: Vec::new(),
             verified: Vec::new(),
             patches: Vec::new(),
             usage: stage_usage,
@@ -275,6 +287,7 @@ pub async fn run_scan(
             ingest,
             triaged,
             findings_by_file: Vec::new(),
+            detect_errors: Vec::new(),
             verified: Vec::new(),
             patches: Vec::new(),
             usage: stage_usage,
@@ -310,6 +323,7 @@ pub async fn run_scan(
     }
     let mut findings_by_file: Vec<FileFindings> = Vec::new();
     let mut all_findings: Vec<Finding> = Vec::new();
+    let mut detect_errors: Vec<DetectError> = Vec::new();
     while let Some(joined) = set.join_next().await {
         if let Ok(outcome) = joined {
             match outcome {
@@ -330,6 +344,10 @@ pub async fn run_scan(
                 }
                 DetectOutcome::Error { cand, error } => {
                     warn!(file = %cand.rel_path, error = %error, "detect errored; skipping file");
+                    detect_errors.push(DetectError {
+                        rel_path: cand.rel_path.clone(),
+                        error: error.clone(),
+                    });
                     emit(
                         events,
                         ScanEvent::DetectFileErrored {
@@ -342,6 +360,7 @@ pub async fn run_scan(
         }
     }
     findings_by_file.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    detect_errors.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     info!(
         files = findings_by_file.len(),
         findings = all_findings.len(),
@@ -456,6 +475,7 @@ pub async fn run_scan(
         ingest,
         triaged,
         findings_by_file,
+        detect_errors,
         verified,
         patches,
         usage: stage_usage,

@@ -74,6 +74,41 @@
 	--sidebar-ring: oklch(0.552 0.016 285.938);
 }
 
+/* Midnight: softer dark variant. Layered on top of `.dark` (both classes are
+   applied to <html> together), so `dark:` utilities keep working — this rule
+   only overrides the CSS variables. Background is lifted from 0.141 → 0.195
+   with a slight cool tint; card and muted are pushed apart for clearer
+   surface elevation; borders are more visible. */
+.midnight {
+	--background: oklch(0.195 0.012 260);
+	--foreground: oklch(0.96 0.005 260);
+	--card: oklch(0.245 0.014 260);
+	--card-foreground: oklch(0.96 0.005 260);
+	--popover: oklch(0.245 0.014 260);
+	--popover-foreground: oklch(0.96 0.005 260);
+	--primary: oklch(0.9 0.01 260);
+	--primary-foreground: oklch(0.22 0.014 260);
+	--secondary: oklch(0.305 0.014 260);
+	--secondary-foreground: oklch(0.96 0.005 260);
+	--muted: oklch(0.3 0.012 260);
+	--muted-foreground: oklch(0.74 0.014 260);
+	--accent: oklch(0.305 0.014 260);
+	--accent-foreground: oklch(0.96 0.005 260);
+	--destructive: oklch(0.7 0.18 22);
+	--destructive-foreground: oklch(0.985 0 0);
+	--border: oklch(1 0 0 / 14%);
+	--input: oklch(1 0 0 / 18%);
+	--ring: oklch(0.6 0.02 260);
+	--sidebar: oklch(0.225 0.013 260);
+	--sidebar-foreground: oklch(0.96 0.005 260);
+	--sidebar-primary: oklch(0.55 0.18 260);
+	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-accent: oklch(0.305 0.014 260);
+	--sidebar-accent-foreground: oklch(0.96 0.005 260);
+	--sidebar-border: oklch(1 0 0 / 14%);
+	--sidebar-ring: oklch(0.6 0.02 260);
+}
+
 @theme inline {
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);

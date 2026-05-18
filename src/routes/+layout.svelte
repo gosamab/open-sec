@@ -5,10 +5,13 @@
 
 	let { children } = $props();
 
-	// Mirror theme state onto <html class="dark"> whenever it changes.
+	// Mirror theme state onto <html class="dark midnight"> whenever it changes.
 	$effect(() => {
 		if (typeof document !== 'undefined') theme.apply(document);
 	});
+
+	// Track OS color-scheme so the 'system' choice flips live.
+	$effect(() => theme.watchSystem());
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>

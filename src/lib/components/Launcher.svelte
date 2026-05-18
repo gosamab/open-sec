@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { Button } from '$lib/components/ui/button';
-	import { theme } from '$lib/theme.svelte';
+	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import {
 		deleteScansForRoot,
 		hasAnthropicKey,
@@ -49,6 +49,16 @@
 			title: 'Choose a folder to scan'
 		});
 		if (typeof picked === 'string') onOpenFresh(picked);
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
+			const target = e.target as HTMLElement | null;
+			if (target && /^(input|textarea)$/i.test(target.tagName)) return;
+			if (!keyConfigured) return;
+			e.preventDefault();
+			void pickNew();
+		}
 	}
 
 	function basename(p: string): string {
@@ -112,54 +122,12 @@
 	}
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <div class="bg-background flex h-screen flex-col">
 	<!-- Topbar (theme toggle only) -->
 	<header class="flex items-center justify-end px-4 py-3">
-		<button
-			type="button"
-			onclick={() => theme.cycle()}
-			class="hover:bg-muted text-muted-foreground hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
-			title={theme.value === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-			aria-label="Toggle theme"
-		>
-			{#if theme.value === 'dark'}
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-				>
-					<circle cx="12" cy="12" r="4" />
-					<path d="M12 2v2" />
-					<path d="M12 20v2" />
-					<path d="m4.93 4.93 1.41 1.41" />
-					<path d="m17.66 17.66 1.41 1.41" />
-					<path d="M2 12h2" />
-					<path d="M20 12h2" />
-					<path d="m6.34 17.66-1.41 1.41" />
-					<path d="m19.07 4.93-1.41 1.41" />
-				</svg>
-			{:else}
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-				>
-					<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-				</svg>
-			{/if}
-		</button>
+		<ThemeToggle />
 	</header>
 
 	<main class="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-6 pb-12 pt-4">

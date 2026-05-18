@@ -33,6 +33,7 @@ pub enum Priority {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriageResult {
     pub priority: Priority,
+    #[serde(default)]
     pub reason: String,
 }
 
@@ -98,15 +99,7 @@ RULES
 - `reason` must be a short concrete justification grounded in what you saw
   in the file, not a restatement of the bucket definition."#;
 
-#[derive(Deserialize)]
-struct RawResult {
-    priority: Priority,
-    #[serde(default)]
-    reason: String,
-}
-
-/// Triage a single file. Returns the LLM's bucket decision. Used directly by
-/// the calibration CLI and via `triage_many` for batched scans.
+/// Triage a single file. Returns the LLM's bucket decision.
 #[instrument(skip(provider, source), fields(path = %rel_path, bytes = source.len()))]
 pub async fn triage_one(
     rel_path: &str,
@@ -138,12 +131,7 @@ pub async fn triage_one(
 fn parse_result(text: &str) -> Result<TriageResult> {
     let json = extract_json_object(text)
         .ok_or_else(|| anyhow!("model response did not contain a JSON object: {text}"))?;
-    let raw: RawResult = serde_json::from_str(json)
-        .with_context(|| format!("parsing triage JSON: {json}"))?;
-    Ok(TriageResult {
-        priority: raw.priority,
-        reason: raw.reason,
-    })
+    serde_json::from_str(json).with_context(|| format!("parsing triage JSON: {json}"))
 }
 
 /// Triage every candidate in parallel under a semaphore. Errors on individual

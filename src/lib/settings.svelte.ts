@@ -54,8 +54,9 @@ function save(s: ScanSettings) {
 	}
 }
 
-/** Concurrency bounds — must match the limits shown in the Settings UI. */
-const CONCURRENCY_BOUNDS: Record<
+/** Concurrency bounds. Exported so the Settings UI uses the same min/max
+ *  values as the clamp logic — keeps them from drifting. */
+export const CONCURRENCY_BOUNDS: Record<
 	'triage_concurrency' | 'detect_concurrency' | 'verify_concurrency' | 'patch_concurrency',
 	{ min: number; max: number }
 > = {

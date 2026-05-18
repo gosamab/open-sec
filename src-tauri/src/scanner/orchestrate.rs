@@ -1,12 +1,9 @@
 //! End-to-end pipeline orchestrator. Chains ingest → triage → detect →
-//! verify → patch with the concurrency caps locked in CLAUDE.md, and
-//! produces a `ScanResult` carrying every intermediate stage's output so
-//! later the UI can render funnels and per-file detail without re-running
-//! anything.
-//!
-//! Cancellation, budget caps, and >1000-file confirmation are intentionally
-//! out of scope here — the CLI just warns; those belong with the UI in
-//! Step 8.
+//! verify → patch with the concurrency caps locked in CLAUDE.md. The
+//! returned `ScanResult` carries every intermediate stage's output so the
+//! UI can render funnels and per-file detail without re-running anything.
+//! Cancellation is cooperative (via the optional `AtomicBool`) and the
+//! token budget cap trips that same flag at stage boundaries.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,16 +108,74 @@ pub struct StageUsage {
     pub total: Usage,
 }
 
-/// Sender used to ferry `ScanEvent`s out of the pipeline. The `Option`
-/// makes event emission opt-in — CLI usage can pass `None` and skip the
-/// extra plumbing.
+/// Sender used to ferry `ScanEvent`s out of the pipeline.
 pub type EventSender = mpsc::UnboundedSender<ScanEvent>;
 
-fn emit(events: Option<&EventSender>, ev: ScanEvent) {
-    if let Some(tx) = events {
-        // Drop on send failure — the receiver simply went away.
-        let _ = tx.send(ev);
+fn emit(events: &EventSender, ev: ScanEvent) {
+    // Drop on send failure — the receiver simply went away.
+    let _ = events.send(ev);
+}
+
+#[derive(Clone, Copy)]
+enum Stage {
+    Triage,
+    Detect,
+    Verify,
+    Patch,
+}
+
+/// Snapshot the usage counter, slot the per-stage delta into `usage`, record
+/// the stage's wall-clock duration, and emit the resulting `UsageUpdate` +
+/// `DurationsUpdate` events. Resets `stage_started` so the next stage starts
+/// timing from now.
+#[allow(clippy::too_many_arguments)]
+fn finish_stage(
+    stage: Stage,
+    counter: &UsageCounter,
+    snapshot_before: &mut Usage,
+    usage: &mut StageUsage,
+    durations: &mut StageDurations,
+    stage_started: &mut Instant,
+    scan_started: Instant,
+    events: &EventSender,
+) {
+    let after = counter.snapshot();
+    let delta = diff(&after, snapshot_before);
+    let elapsed = stage_started.elapsed().as_millis() as u64;
+    match stage {
+        Stage::Triage => {
+            usage.triage = delta;
+            durations.triage_ms = elapsed;
+        }
+        Stage::Detect => {
+            usage.detect = delta;
+            durations.detect_ms = elapsed;
+        }
+        Stage::Verify => {
+            usage.verify = delta;
+            durations.verify_ms = elapsed;
+        }
+        Stage::Patch => {
+            usage.patch = delta;
+            durations.patch_ms = elapsed;
+        }
     }
+    usage.total = after.clone();
+    durations.total_ms = scan_started.elapsed().as_millis() as u64;
+    *snapshot_before = after;
+    *stage_started = Instant::now();
+    emit(
+        events,
+        ScanEvent::UsageUpdate {
+            usage: usage.clone(),
+        },
+    );
+    emit(
+        events,
+        ScanEvent::DurationsUpdate {
+            durations: durations.clone(),
+        },
+    );
 }
 
 /// Tuning knobs for a scan. Defaults follow the locked decisions in
@@ -238,11 +293,10 @@ pub async fn run_scan(
     root: PathBuf,
     provider: Arc<dyn Provider>,
     config: &ScanConfig,
-    events: Option<EventSender>,
+    events: EventSender,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ScanResult> {
-    let events = events.as_ref();
-    emit(events, ScanEvent::Started { root: root.clone() });
+    emit(&events, ScanEvent::Started { root: root.clone() });
 
     // Layer decorators on the inbound provider. Order matters:
     //   - Retry sits innermost so its sleeps don't get token-counted.
@@ -254,14 +308,12 @@ pub async fn run_scan(
     // cancel takes effect at the next round-trip.
     let counter = UsageCounter::new();
     let retry_notify: crate::providers::counting::RetryNotify = {
-        let events_clone = events.cloned();
+        let events_clone = events.clone();
         Arc::new(move |dur: std::time::Duration, attempt: u32| {
-            if let Some(tx) = &events_clone {
-                let _ = tx.send(ScanEvent::RateLimited {
-                    attempt,
-                    retry_after_secs: dur.as_secs(),
-                });
-            }
+            let _ = events_clone.send(ScanEvent::RateLimited {
+                attempt,
+                retry_after_secs: dur.as_secs(),
+            });
         })
     };
     let mut retrying = RetryingProvider::new(provider).with_notify(retry_notify);
@@ -306,7 +358,7 @@ pub async fn run_scan(
         );
     }
     emit(
-        events,
+        &events,
         ScanEvent::IngestComplete {
             walk: ingest.clone(),
         },
@@ -314,7 +366,7 @@ pub async fn run_scan(
     durations.ingest_ms = stage_started.elapsed().as_millis() as u64;
     durations.total_ms = scan_started.elapsed().as_millis() as u64;
     emit(
-        events,
+        &events,
         ScanEvent::DurationsUpdate {
             durations: durations.clone(),
         },
@@ -355,33 +407,22 @@ pub async fn run_scan(
         "triage complete"
     );
     emit(
-        events,
+        &events,
         ScanEvent::TriageComplete {
             triaged: triaged.clone(),
         },
     );
-    {
-        let after = counter.snapshot();
-        stage_usage.triage = diff(&after, &snapshot_before_stage);
-        stage_usage.total = after.clone();
-        snapshot_before_stage = after;
-        emit(
-            events,
-            ScanEvent::UsageUpdate {
-                usage: stage_usage.clone(),
-            },
-        );
-        durations.triage_ms = stage_started.elapsed().as_millis() as u64;
-        durations.total_ms = scan_started.elapsed().as_millis() as u64;
-        emit(
-            events,
-            ScanEvent::DurationsUpdate {
-                durations: durations.clone(),
-            },
-        );
-        stage_started = Instant::now();
-        trip_budget_if_over(&stage_usage.total);
-    }
+    finish_stage(
+        Stage::Triage,
+        &counter,
+        &mut snapshot_before_stage,
+        &mut stage_usage,
+        &mut durations,
+        &mut stage_started,
+        scan_started,
+        &events,
+    );
+    trip_budget_if_over(&stage_usage.total);
 
     if is_cancelled() {
         info!("scan cancelled after triage");
@@ -401,7 +442,7 @@ pub async fn run_scan(
 
     // ----- 3. Detect (parallel under Semaphore, streaming per-file) ---
     let detect_permits = Arc::new(Semaphore::new(config.detect_concurrency.max(1)));
-    let mut set: JoinSet<DetectOutcome> = JoinSet::new();
+    let mut set: JoinSet<(Candidate, Result<Vec<Finding>, String>)> = JoinSet::new();
     let detect_root = Arc::new(root.clone());
     let detect_model = Arc::new(config.detect_model.clone());
     for cand in to_detect {
@@ -412,29 +453,28 @@ pub async fn run_scan(
         set.spawn(async move {
             let _permit = match permits.acquire_owned().await {
                 Ok(p) => p,
-                Err(_) => return DetectOutcome::error(cand, "semaphore closed"),
+                Err(_) => return (cand, Err("semaphore closed".to_string())),
             };
             let source = match tokio::fs::read_to_string(&cand.path).await {
                 Ok(s) => s,
-                Err(e) => return DetectOutcome::error(cand, &format!("read failed: {e}")),
+                Err(e) => return (cand, Err(format!("read failed: {e}"))),
             };
-            match scan_with_tools(&cand.path, root.as_ref(), &source, provider.as_ref(), &model)
-                .await
-            {
-                Ok(findings) => DetectOutcome::ok(cand, findings),
-                Err(e) => DetectOutcome::error(cand, &format!("detect failed: {e:#}")),
-            }
+            let result =
+                scan_with_tools(&cand.path, root.as_ref(), &source, provider.as_ref(), &model)
+                    .await
+                    .map_err(|e| format!("detect failed: {e:#}"));
+            (cand, result)
         });
     }
     let mut findings_by_file: Vec<FileFindings> = Vec::new();
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut detect_errors: Vec<DetectError> = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok(outcome) = joined {
+        if let Ok((cand, outcome)) = joined {
             match outcome {
-                DetectOutcome::Ok { cand, findings } => {
+                Ok(findings) => {
                     emit(
-                        events,
+                        &events,
                         ScanEvent::DetectFileComplete {
                             rel_path: cand.rel_path.clone(),
                             findings: findings.clone(),
@@ -447,14 +487,14 @@ pub async fn run_scan(
                         findings,
                     });
                 }
-                DetectOutcome::Error { cand, error } => {
+                Err(error) => {
                     warn!(file = %cand.rel_path, error = %error, "detect errored; skipping file");
                     detect_errors.push(DetectError {
                         rel_path: cand.rel_path.clone(),
                         error: error.clone(),
                     });
                     emit(
-                        events,
+                        &events,
                         ScanEvent::DetectFileErrored {
                             rel_path: cand.rel_path,
                             error,
@@ -472,33 +512,22 @@ pub async fn run_scan(
         "detect complete"
     );
     emit(
-        events,
+        &events,
         ScanEvent::DetectComplete {
             total: all_findings.len(),
         },
     );
-    {
-        let after = counter.snapshot();
-        stage_usage.detect = diff(&after, &snapshot_before_stage);
-        stage_usage.total = after.clone();
-        snapshot_before_stage = after;
-        emit(
-            events,
-            ScanEvent::UsageUpdate {
-                usage: stage_usage.clone(),
-            },
-        );
-        durations.detect_ms = stage_started.elapsed().as_millis() as u64;
-        durations.total_ms = scan_started.elapsed().as_millis() as u64;
-        emit(
-            events,
-            ScanEvent::DurationsUpdate {
-                durations: durations.clone(),
-            },
-        );
-        stage_started = Instant::now();
-        trip_budget_if_over(&stage_usage.total);
-    }
+    finish_stage(
+        Stage::Detect,
+        &counter,
+        &mut snapshot_before_stage,
+        &mut stage_usage,
+        &mut durations,
+        &mut stage_started,
+        scan_started,
+        &events,
+    );
+    trip_budget_if_over(&stage_usage.total);
 
     // ----- 4. Verify --------------------------------------------------
     let verified = if all_findings.is_empty() || is_cancelled() {
@@ -529,33 +558,22 @@ pub async fn run_scan(
         "verify complete"
     );
     emit(
-        events,
+        &events,
         ScanEvent::VerifyComplete {
             verified: verified.clone(),
         },
     );
-    {
-        let after = counter.snapshot();
-        stage_usage.verify = diff(&after, &snapshot_before_stage);
-        stage_usage.total = after.clone();
-        snapshot_before_stage = after;
-        durations.verify_ms = stage_started.elapsed().as_millis() as u64;
-        durations.total_ms = scan_started.elapsed().as_millis() as u64;
-        stage_started = Instant::now();
-        emit(
-            events,
-            ScanEvent::DurationsUpdate {
-                durations: durations.clone(),
-            },
-        );
-        emit(
-            events,
-            ScanEvent::UsageUpdate {
-                usage: stage_usage.clone(),
-            },
-        );
-        trip_budget_if_over(&stage_usage.total);
-    }
+    finish_stage(
+        Stage::Verify,
+        &counter,
+        &mut snapshot_before_stage,
+        &mut stage_usage,
+        &mut durations,
+        &mut stage_started,
+        scan_started,
+        &events,
+    );
+    trip_budget_if_over(&stage_usage.total);
 
     // ----- 5. Patch ---------------------------------------------------
     let patches = if kept_or_hardening == 0 || is_cancelled() {
@@ -575,31 +593,22 @@ pub async fn run_scan(
     };
     info!(count = patches.len(), "patch complete");
     emit(
-        events,
+        &events,
         ScanEvent::PatchComplete {
             patches: patches.clone(),
         },
     );
-    {
-        let after = counter.snapshot();
-        stage_usage.patch = diff(&after, &snapshot_before_stage);
-        stage_usage.total = after;
-        emit(
-            events,
-            ScanEvent::UsageUpdate {
-                usage: stage_usage.clone(),
-            },
-        );
-        durations.patch_ms = stage_started.elapsed().as_millis() as u64;
-        durations.total_ms = scan_started.elapsed().as_millis() as u64;
-        emit(
-            events,
-            ScanEvent::DurationsUpdate {
-                durations: durations.clone(),
-            },
-        );
-        trip_budget_if_over(&stage_usage.total);
-    }
+    finish_stage(
+        Stage::Patch,
+        &counter,
+        &mut snapshot_before_stage,
+        &mut stage_usage,
+        &mut durations,
+        &mut stage_started,
+        scan_started,
+        &events,
+    );
+    trip_budget_if_over(&stage_usage.total);
 
     Ok(ScanResult {
         root,
@@ -615,25 +624,3 @@ pub async fn run_scan(
     })
 }
 
-enum DetectOutcome {
-    Ok {
-        cand: Candidate,
-        findings: Vec<Finding>,
-    },
-    Error {
-        cand: Candidate,
-        error: String,
-    },
-}
-
-impl DetectOutcome {
-    fn ok(cand: Candidate, findings: Vec<Finding>) -> Self {
-        Self::Ok { cand, findings }
-    }
-    fn error(cand: Candidate, error: &str) -> Self {
-        Self::Error {
-            cand,
-            error: error.to_string(),
-        }
-    }
-}

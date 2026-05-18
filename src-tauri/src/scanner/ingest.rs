@@ -1,8 +1,6 @@
 //! Repo walk + pre-triage skips. Produces the set of files the LLM triage
-//! pass will see, plus a parallel `Skipped` list so the funnel is visible in
-//! UI later. Everything LLM-touching is downstream — this module is pure I/O
-//! + heuristics, fully sync (cheap enough to not need tokio), and unit-tested
-//! against tempdirs.
+//! pass will see, plus a parallel `Skipped` list for the UI funnel. Pure
+//! I/O + heuristics; the language allowlist lives in `scanner::languages`.
 
 use std::path::{Path, PathBuf};
 
@@ -34,17 +32,6 @@ const EXCLUDED_DIRS: &[&str] = &[
     "coverage",
     ".git",
 ];
-
-/// Extensions whose files we triage. Lowercase, no leading dot.
-const ALLOWED_EXTS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rb", "php", "java", "kt", "swift",
-    "cs", "c", "cc", "cpp", "h", "hpp", "m", "mm", "dart", "svelte", "vue", "html", "htm", "yml",
-    "yaml", "tf", "hcl", "sh",
-];
-
-/// Exact filenames (case-sensitive) accepted even without a recognized
-/// extension.
-const ALLOWED_NAMES: &[&str] = &["Dockerfile", "docker-compose.yml", ".env.example"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
@@ -166,16 +153,7 @@ fn is_in_excluded_dir(rel: &Path) -> bool {
 }
 
 fn is_allowed(path: &Path) -> bool {
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if ALLOWED_NAMES.iter().any(|n| *n == name) {
-            return true;
-        }
-    }
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        let lower = ext.to_ascii_lowercase();
-        return ALLOWED_EXTS.iter().any(|e| *e == lower);
-    }
-    false
+    super::languages::is_scannable_path(path)
 }
 
 enum Classification {

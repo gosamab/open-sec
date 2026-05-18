@@ -1,10 +1,7 @@
-//! Export a `ScanResult` to human-readable markdown or to SARIF v2.1.0
-//! (the OASIS-standard format consumed by GitHub code-scanning, VS Code,
-//! and most security CI plugins).
-//!
-//! Both formats reflect the post-verify state: vulns dropped by the
-//! verifier are excluded; hardening items are included as `note`-level.
-//! Patches are inlined for markdown and surfaced under SARIF `fixes`.
+//! Export a `ScanResult` to markdown or SARIF v2.1.0. Both formats reflect
+//! the post-verify state — dropped vulns are excluded, hardening items
+//! appear as `note`-level. Patches are inlined for markdown and surfaced
+//! under SARIF `fixes`.
 
 use serde_json::json;
 

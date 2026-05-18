@@ -3,9 +3,10 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 use super::sandbox::{relativize, resolve_inside};
+use crate::scanner::languages::{lang_for_path, Lang};
 
 #[derive(Deserialize)]
 struct ListImportsArgs {
@@ -22,7 +23,7 @@ pub async fn list_imports(input: &Value, scan_root: &Path) -> Result<String> {
     let source = tokio::fs::read_to_string(&target).await?;
     let label = relativize(&target, scan_root).display().to_string();
 
-    let imports = match language_for(&target) {
+    let imports = match lang_for_path(&target) {
         Some(lang) => extract_imports(&source, lang)?,
         None => {
             return Ok(format!(
@@ -41,94 +42,8 @@ pub async fn list_imports(input: &Value, scan_root: &Path) -> Result<String> {
     Ok(out)
 }
 
-#[derive(Clone, Copy)]
-enum Lang {
-    Rust,
-    JavaScript,
-    Typescript,
-    Tsx,
-    Python,
-    Dart,
-    Java,
-    CSharp,
-    Html,
-}
-
-fn language_for(path: &Path) -> Option<Lang> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "rs" => Lang::Rust,
-        "ts" => Lang::Typescript,
-        "tsx" => Lang::Tsx,
-        "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
-        "py" => Lang::Python,
-        "dart" => Lang::Dart,
-        "java" => Lang::Java,
-        "cs" => Lang::CSharp,
-        "html" | "htm" => Lang::Html,
-        _ => return None,
-    })
-}
-
-fn tree_sitter_language(lang: Lang) -> Language {
-    match lang {
-        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-        Lang::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        Lang::Python => tree_sitter_python::LANGUAGE.into(),
-        Lang::Dart => tree_sitter_dart::LANGUAGE.into(),
-        Lang::Java => tree_sitter_java::LANGUAGE.into(),
-        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-        Lang::Html => tree_sitter_html::LANGUAGE.into(),
-    }
-}
-
-fn query_for(lang: Lang) -> &'static str {
-    match lang {
-        Lang::Rust => "(use_declaration) @import",
-        // Covers ES import + CommonJS require + dynamic import().
-        Lang::JavaScript | Lang::Typescript | Lang::Tsx => {
-            r#"
-            (import_statement) @import
-            (call_expression
-                function: (identifier) @fn
-                (#eq? @fn "require")) @import
-            "#
-        }
-        // Covers `import foo` and `from foo import bar`.
-        Lang::Python => {
-            r#"
-            (import_statement) @import
-            (import_from_statement) @import
-            "#
-        }
-        // `import 'package:foo/bar.dart';` plus part / export.
-        Lang::Dart => {
-            r#"
-            (import_or_export) @import
-            "#
-        }
-        Lang::Java => "(import_declaration) @import",
-        Lang::CSharp => "(using_directive) @import",
-        // <script src=…> tags plus any tag with src/href so external
-        // references (link, img, iframe, etc.) surface.
-        Lang::Html => {
-            r#"
-            (script_element) @import
-            (start_tag
-                (attribute (attribute_name) @attr)
-                (#match? @attr "^(src|href)$")) @import
-            (self_closing_tag
-                (attribute (attribute_name) @attr2)
-                (#match? @attr2 "^(src|href)$")) @import
-            "#
-        }
-    }
-}
-
 fn extract_imports(source: &str, lang: Lang) -> Result<Vec<String>> {
-    let ts_lang = tree_sitter_language(lang);
+    let ts_lang = lang.tree_sitter_language();
     let mut parser = Parser::new();
     parser
         .set_language(&ts_lang)
@@ -137,8 +52,8 @@ fn extract_imports(source: &str, lang: Lang) -> Result<Vec<String>> {
         .parse(source, None)
         .ok_or_else(|| anyhow!("tree-sitter parse failed"))?;
 
-    let query =
-        Query::new(&ts_lang, query_for(lang)).map_err(|e| anyhow!("query compile: {e}"))?;
+    let query = Query::new(&ts_lang, lang.imports_query())
+        .map_err(|e| anyhow!("query compile: {e}"))?;
     let mut cursor = QueryCursor::new();
     let mut out = Vec::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());

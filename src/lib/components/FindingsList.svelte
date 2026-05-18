@@ -13,6 +13,7 @@
 		skipReasonLabel,
 		statusClass,
 		statusLabelFor,
+		STATUS_OPTIONS,
 		type FindingStatus,
 		type FindingStatusInputs,
 		type FindingsFilter,
@@ -122,16 +123,6 @@
 		{ key: 'line', label: 'Line' }
 	];
 
-	const STATUS_OPTIONS: { key: FindingStatus; label: string }[] = [
-		{ key: 'open', label: 'Open' },
-		{ key: 'patched', label: 'Patched' },
-		{ key: 'accepted', label: 'Accepted' },
-		{ key: 'snoozed', label: 'Snoozed' },
-		{ key: 'dismissed', label: 'Dismissed' },
-		{ key: 'dropped', label: 'Dropped' },
-		{ key: 'pending', label: 'Pending' },
-		{ key: 'verifying', label: 'Verifying' }
-	];
 
 	const KIND_OPTIONS: { key: KindFilter; label: string }[] = [
 		{ key: 'all', label: 'All' },
@@ -413,37 +404,13 @@
 				</div>
 			{:else if stage === 'done' && allFindingsCount === 0}
 				{#if detectErrors.size > 0}
-					<div class="space-y-3 px-4 py-6 text-sm">
-						<div class="space-y-2 text-center">
-							<div class="text-destructive text-2xl leading-none">!</div>
-							<p class="font-medium">Scan finished with errors</p>
-							<p class="text-muted-foreground text-xs leading-relaxed">
-								{detectErrors.size} of {hasWalk ? walkCandidateCount : 0} file(s) couldn't be scanned. No findings produced.
-							</p>
-						</div>
-						<ul class="border-border max-h-72 space-y-1 overflow-y-auto rounded-md border p-1">
-							{#each Array.from(detectErrors) as [rel, msg] (rel)}
-								{@const h = humanizeError(msg)}
-								<li class="hover:bg-muted/40 rounded px-2 py-2">
-									<button
-										type="button"
-										class="text-primary block w-full text-left text-xs hover:underline"
-										onclick={() => onSelectFile(rel)}
-										title={rel}
-									>
-										<span class="font-mono">{rel}</span>
-									</button>
-									<div class="mt-1 text-xs">{h.title}</div>
-									{#if h.detail}
-										<div
-											class="text-muted-foreground mt-0.5 text-[0.6875rem] leading-relaxed"
-										>
-											{h.detail}
-										</div>
-									{/if}
-								</li>
-							{/each}
-						</ul>
+					<div class="space-y-2 px-4 py-8 text-center text-sm">
+						<div class="text-destructive text-2xl leading-none">!</div>
+						<p class="font-medium">Scan finished with errors</p>
+						<p class="text-muted-foreground text-xs leading-relaxed">
+							{detectErrors.size} of {hasWalk ? walkCandidateCount : 0} file(s) couldn't be scanned.
+							See the summary pane for details and retry options.
+						</p>
 					</div>
 				{:else}
 					<div class="space-y-2 px-4 py-8 text-center text-sm">

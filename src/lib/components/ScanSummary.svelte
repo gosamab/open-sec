@@ -8,9 +8,10 @@
 		humanizeError,
 		severityDot,
 		skipReasonLabel,
-		statusDotClass
+		statusDotClass,
+		STATUS_OPTIONS,
+		type FindingStatus
 	} from '$lib/scan-display';
-	import type { FindingStatus } from '$lib/scan-display';
 
 	export type UsageRow = { name: string; u: StageUsage['triage']; ms: number };
 
@@ -75,16 +76,6 @@
 		{ key: 'low', label: 'Low' }
 	];
 
-	const STATUS_ROWS: { key: FindingStatus; label: string }[] = [
-		{ key: 'open', label: 'Open' },
-		{ key: 'patched', label: 'Patched' },
-		{ key: 'accepted', label: 'Accepted' },
-		{ key: 'snoozed', label: 'Snoozed' },
-		{ key: 'dismissed', label: 'Dismissed' },
-		{ key: 'dropped', label: 'Dropped' },
-		{ key: 'pending', label: 'Pending' },
-		{ key: 'verifying', label: 'Verifying' }
-	];
 </script>
 
 <div class="p-4">
@@ -353,7 +344,7 @@
 					<div class="text-muted-foreground/70 text-[0.625rem]">one per finding</div>
 				</div>
 				<dl class="grid grid-cols-[1fr_auto] gap-x-3 text-xs">
-					{#each STATUS_ROWS as row (row.key)}
+					{#each STATUS_OPTIONS as row (row.key)}
 						{@const n = totals[row.key]}
 						{#if n > 0 || row.key === 'open' || row.key === 'patched'}
 							<dt

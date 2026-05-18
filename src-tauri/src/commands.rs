@@ -11,10 +11,10 @@ use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::Provider;
 use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
-use crate::scanner::excerpts::{extract_from_str, Excerpt};
+use crate::scanner::excerpts::{extract, Excerpt};
 use crate::scanner::orchestrate::{run_scan, ScanConfig, ScanEvent, ScanResult};
 use crate::scanner::patch::{
-    locate, propose_one_with_history, Located, Patch, PatchProposal, DEFAULT_PATCH_MODEL,
+    locate, propose_one, Located, Patch, PatchProposal, DEFAULT_PATCH_MODEL,
 };
 use crate::scanner::verify::VerifiedFinding;
 use crate::scanner::Finding;
@@ -98,11 +98,9 @@ pub async fn scan_file(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Run the full pipeline on a directory. Streams per-stage progress to the
-/// frontend via the "scan:event" Tauri event; resolves with the final
-/// `ScanResult`. On success, persists the result to SQLite for later recall.
-/// If `cancel_scan` is invoked while running, returns the partial result
-/// with status `cancelled`.
+/// Run the full pipeline on a directory. Per-stage progress streams via the
+/// `scan:event` Tauri event; the final `ScanResult` is persisted to SQLite.
+/// `cancel_scan` makes this return the partial result with `status = cancelled`.
 #[tauri::command]
 #[instrument(skip(app, store, cancel), fields(root = %root))]
 pub async fn run_pipeline(
@@ -134,7 +132,7 @@ pub async fn run_pipeline(
 
     let cancel_flag = cancel.install();
     let config = config.unwrap_or_default();
-    let mut result = run_scan(root_path, provider, &config, Some(tx), Some(cancel_flag.clone()))
+    let mut result = run_scan(root_path, provider, &config, tx, Some(cancel_flag.clone()))
         .await
         .map_err(|e| {
             cancel.clear();
@@ -159,24 +157,22 @@ pub async fn run_pipeline(
     Ok(result)
 }
 
-/// Flag the currently-running scan for cancellation. The pipeline will
-/// finish the current API call, skip subsequent stages, and return
-/// whatever it had collected.
+/// Flag the running scan for cancellation. The pipeline finishes its
+/// current API call, skips later stages, and returns the partial result.
 #[tauri::command]
 pub fn cancel_scan(cancel: State<'_, CancelHandle>) -> bool {
     cancel.cancel()
 }
 
-/// Read a code excerpt for the finding's line range. Uses tree-sitter to
-/// locate the enclosing function/class when possible, falls back to a ±N
-/// line window for unsupported languages or top-level code.
+/// Code excerpt for a finding's line range. Tree-sitter languages get the
+/// enclosing function/class; others fall back to a ±N line window.
 #[tauri::command]
 pub fn get_excerpt(
     file: String,
     line_start: u32,
     line_end: u32,
 ) -> Result<Excerpt, String> {
-    extract_from_str(&file, line_start, line_end).map_err(|e| format!("{e:#}"))
+    extract(&PathBuf::from(&file), line_start, line_end).map_err(|e| format!("{e:#}"))
 }
 
 #[derive(serde::Serialize)]
@@ -201,7 +197,7 @@ pub async fn regenerate_patch(
     let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
     let provider: Arc<dyn Provider> =
         Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
-    propose_one_with_history(
+    propose_one(
         &verified,
         &scan_root,
         provider.as_ref(),
@@ -212,12 +208,10 @@ pub async fn regenerate_patch(
     .map_err(|e| format!("{e:#}"))
 }
 
-/// Apply a patch to disk. Re-locates `old_block` in the current file
-/// content (exact match first, then fuzzy whitespace-tolerant), splices
-/// `new_block` in its place, and writes the result back. Fails cleanly
-/// if the file has drifted such that `old_block` no longer matches —
-/// no partial writes. Records the apply in SQLite so the UI badge
-/// survives reloads.
+/// Apply a patch to disk. Re-locates `old_block` (exact, then fuzzy),
+/// splices `new_block`, and writes the result back. Fails clean — no
+/// partial writes — if the file has drifted since the patch was drafted.
+/// Records the apply in SQLite so the UI badge survives reload.
 #[tauri::command]
 pub fn apply_patch(
     store: State<'_, Store>,
@@ -352,12 +346,7 @@ pub fn set_triage(
     reason: Option<String>,
     snooze_until: Option<i64>,
 ) -> Result<(), String> {
-    let parsed = match status.as_str() {
-        "accepted" => TriageStatus::Accepted,
-        "dismissed" => TriageStatus::Dismissed,
-        "snoozed" => TriageStatus::Snoozed,
-        other => return Err(format!("unknown triage status: {other}")),
-    };
+    let parsed = TriageStatus::from_str(&status).map_err(|e| e.to_string())?;
     if parsed == TriageStatus::Dismissed && reason.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err("dismissed requires a non-empty reason".into());
     }
@@ -392,12 +381,9 @@ pub fn get_triage_for_root(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Open a URL in the user's default browser. Used by the markdown renderer
-/// so clicking an LLM-generated link doesn't navigate the Tauri webview.
-///
-/// Scheme is whitelisted (`http`, `https`, `mailto`) — anything else (file://,
-/// javascript:, custom protocols) is rejected here rather than relying on
-/// the OS to refuse. macOS-only for v0.1: shells out to `open(1)`.
+/// Open a URL in the user's default browser. Scheme is whitelisted
+/// (http/https/mailto) so an LLM-generated link can't reach file://,
+/// javascript:, or custom protocols. macOS-only: shells out to `open(1)`.
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();

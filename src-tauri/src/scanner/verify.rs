@@ -1,11 +1,6 @@
 //! Verification pass — Opus adversarially re-examines each `vuln` finding
-//! and decides whether the source → sink path is actually reachable. Outputs
-//! a structured `Verdict`; a finding is kept iff `is_reachable` and a
-//! `concrete_exploit` was constructed.
-//!
-//! Hardening findings bypass the verifier entirely (per CLAUDE.md): they
-//! describe defense-in-depth gaps, not reachable bugs, so adversarial
-//! reachability analysis doesn't apply.
+//! and emits a `Verdict`. Kept iff `is_reachable && concrete_exploit.is_some()`.
+//! Hardening findings skip this stage entirely (defense-in-depth, not bugs).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +16,7 @@ use crate::providers::{
     CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
     SystemBlock,
 };
-use crate::scanner::util::{collect_text, extract_json_object};
+use crate::scanner::util::{collect_text, extract_json_object, resolve_focus_path, with_line_numbers};
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
 
@@ -352,27 +347,6 @@ fn parse_verdict(text: &str) -> Result<Verdict> {
     serde_json::from_str(json).with_context(|| format!("parsing verdict JSON: {json}"))
 }
 
-/// If `finding.file` is absolute and inside `root`, use it directly. Otherwise
-/// treat it as a path relative to `root`.
-fn resolve_focus_path(root: &Path, file: &str) -> PathBuf {
-    let p = PathBuf::from(file);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
-}
-
-fn with_line_numbers(source: &str) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let width = lines.len().to_string().len().max(3);
-    let mut out = String::with_capacity(source.len() + lines.len() * (width + 3));
-    for (i, line) in lines.iter().enumerate() {
-        use std::fmt::Write;
-        let _ = writeln!(&mut out, "{:>width$}| {}", i + 1, line, width = width);
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {

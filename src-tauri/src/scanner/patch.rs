@@ -1,10 +1,9 @@
-//! Patch proposal pass — Sonnet drafts a minimal fix for each surviving
-//! finding (verified vulns + all hardening items). The model returns a
+//! Patch proposal pass — Sonnet drafts a minimal fix per surviving finding
+//! (kept vulns + all hardening items). The model returns a
 //! `PatchProposal { file, anchor_line, old_block, new_block, explanation }`;
-//! Rust locates `old_block` in the file (exact match first, then a fuzzy
-//! line-trimmed fallback) and synthesizes a unified diff via `diffy`.
-//!
-//! Patches are display-only — they are never applied to disk.
+//! we locate `old_block` (exact, then fuzzy line-trimmed) and synthesize a
+//! unified diff via `diffy`. Writing back to disk is gated behind the
+//! `apply_patch` IPC, not done here.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +20,7 @@ use crate::providers::{
     CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
     SystemBlock,
 };
-use crate::scanner::util::{collect_text, extract_json_object};
+use crate::scanner::util::{collect_text, extract_json_object, resolve_focus_path, with_line_numbers};
 use crate::scanner::verify::VerifiedFinding;
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
@@ -149,27 +148,7 @@ fn system_prompt() -> String {
 /// the same finding — when non-empty, the prompt asks the model to pick a
 /// structurally different fix from the listed alternatives.
 #[instrument(skip(provider, vf, prior_attempts), fields(file = %vf.finding.file, cwe = %vf.finding.cwe))]
-pub async fn propose_one_with_history(
-    vf: &VerifiedFinding,
-    scan_root: &Path,
-    provider: &dyn Provider,
-    model: &str,
-    prior_attempts: &[PatchProposal],
-) -> Result<Patch> {
-    propose_one_impl(vf, scan_root, provider, model, prior_attempts).await
-}
-
-#[instrument(skip(provider, vf), fields(file = %vf.finding.file, cwe = %vf.finding.cwe))]
 pub async fn propose_one(
-    vf: &VerifiedFinding,
-    scan_root: &Path,
-    provider: &dyn Provider,
-    model: &str,
-) -> Result<Patch> {
-    propose_one_impl(vf, scan_root, provider, model, &[]).await
-}
-
-async fn propose_one_impl(
     vf: &VerifiedFinding,
     scan_root: &Path,
     provider: &dyn Provider,
@@ -287,7 +266,7 @@ pub async fn propose_many(
         let scan_root = scan_root.clone();
         set.spawn(async move {
             let _permit = permits.acquire_owned().await.ok()?;
-            match propose_one(&vf, &scan_root, provider.as_ref(), &model).await {
+            match propose_one(&vf, &scan_root, provider.as_ref(), &model, &[]).await {
                 Ok(p) => Some(p),
                 Err(e) => {
                     warn!(file = %vf.finding.file, error = format!("{e:#}"), "patch call failed");
@@ -535,26 +514,6 @@ fn strip_default_header(diff: &str) -> &str {
         }
     }
     &diff[start..]
-}
-
-fn resolve_focus_path(root: &Path, file: &str) -> PathBuf {
-    let p = PathBuf::from(file);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
-}
-
-fn with_line_numbers(source: &str) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let width = lines.len().to_string().len().max(3);
-    let mut out = String::with_capacity(source.len() + lines.len() * (width + 3));
-    for (i, line) in lines.iter().enumerate() {
-        use std::fmt::Write;
-        let _ = writeln!(&mut out, "{:>width$}| {}", i + 1, line, width = width);
-    }
-    out
 }
 
 #[cfg(test)]

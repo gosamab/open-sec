@@ -16,10 +16,6 @@ pub fn resolve_inside(rel_or_abs: &str, scan_root: &Path) -> Result<PathBuf> {
         scan_root.join(candidate)
     };
 
-    // We canonicalize when the target exists (most tools) but also allow
-    // pre-existing path containment by walking parents — useful for tools
-    // that look up paths that may not exist yet (none in Step 4, but
-    // keep the API symmetric for later).
     let canonical = match joined.canonicalize() {
         Ok(p) => p,
         Err(e) => return Err(anyhow!("canonicalize {}: {}", joined.display(), e)),

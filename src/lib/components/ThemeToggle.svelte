@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Check, Monitor, Moon, MoonStar, Sun } from 'lucide-svelte';
 	import { theme, type ThemeChoice } from '$lib/theme.svelte';
 
 	let menuOpen = $state(false);
@@ -27,12 +28,23 @@
 		menuOpen = false;
 	}
 
+	const ICONS = {
+		system: Monitor,
+		light: Sun,
+		midnight: MoonStar,
+		dark: Moon
+	} as const;
+
 	const OPTIONS: { value: ThemeChoice; label: string }[] = [
 		{ value: 'system', label: 'System' },
 		{ value: 'light', label: 'Light' },
 		{ value: 'midnight', label: 'Midnight' },
 		{ value: 'dark', label: 'Dark' }
 	];
+
+	const TriggerIcon = $derived(
+		theme.resolved === 'light' ? Sun : theme.resolved === 'midnight' ? MoonStar : Moon
+	);
 </script>
 
 <div class="relative" bind:this={menuRef}>
@@ -45,62 +57,7 @@
 		aria-haspopup="menu"
 		aria-expanded={menuOpen}
 	>
-		{#if theme.resolved === 'light'}
-			<!-- Sun -->
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				width="14"
-				height="14"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-			>
-				<circle cx="12" cy="12" r="4" />
-				<path d="M12 2v2" />
-				<path d="M12 20v2" />
-				<path d="m4.93 4.93 1.41 1.41" />
-				<path d="m17.66 17.66 1.41 1.41" />
-				<path d="M2 12h2" />
-				<path d="M20 12h2" />
-				<path d="m6.34 17.66-1.41 1.41" />
-				<path d="m19.07 4.93-1.41 1.41" />
-			</svg>
-		{:else if theme.resolved === 'midnight'}
-			<!-- Moon + star -->
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				width="14"
-				height="14"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-			>
-				<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-				<path d="M19 3v4" />
-				<path d="M21 5h-4" />
-			</svg>
-		{:else}
-			<!-- Moon -->
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				width="14"
-				height="14"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-			>
-				<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-			</svg>
-		{/if}
+		<TriggerIcon size={14} />
 	</button>
 
 	{#if menuOpen}
@@ -110,6 +67,7 @@
 		>
 			{#each OPTIONS as opt (opt.value)}
 				{@const selected = theme.value === opt.value}
+				{@const Icon = ICONS[opt.value]}
 				<button
 					type="button"
 					role="menuitemradio"
@@ -121,97 +79,12 @@
 				>
 					<div class="flex min-w-0 flex-1 items-center gap-2">
 						<span class="text-muted-foreground inline-flex h-4 w-4 shrink-0 items-center justify-center">
-							{#if opt.value === 'system'}
-								<!-- Monitor -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<rect x="2" y="3" width="20" height="14" rx="2" />
-									<path d="M8 21h8" />
-									<path d="M12 17v4" />
-								</svg>
-							{:else if opt.value === 'light'}
-								<!-- Sun -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<circle cx="12" cy="12" r="4" />
-									<path d="M12 2v2" />
-									<path d="M12 20v2" />
-									<path d="m4.93 4.93 1.41 1.41" />
-									<path d="m17.66 17.66 1.41 1.41" />
-									<path d="M2 12h2" />
-									<path d="M20 12h2" />
-									<path d="m6.34 17.66-1.41 1.41" />
-									<path d="m19.07 4.93-1.41 1.41" />
-								</svg>
-							{:else if opt.value === 'midnight'}
-								<!-- Moon + star -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-									<path d="M19 3v4" />
-									<path d="M21 5h-4" />
-								</svg>
-							{:else}
-								<!-- Moon -->
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-								</svg>
-							{/if}
+							<Icon size={13} />
 						</span>
 						<span class="truncate font-medium">{opt.label}</span>
 					</div>
 					{#if selected}
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							width="12"
-							height="12"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							class="shrink-0"
-						>
-							<path d="M20 6 9 17l-5-5" />
-						</svg>
+						<Check size={12} class="shrink-0" />
 					{/if}
 				</button>
 			{/each}

@@ -111,7 +111,7 @@ impl TriageStatus {
             TriageStatus::Snoozed => "snoozed",
         }
     }
-    fn from_str(s: &str) -> Result<Self> {
+    pub fn from_str(s: &str) -> Result<Self> {
         Ok(match s {
             "accepted" => TriageStatus::Accepted,
             "dismissed" => TriageStatus::Dismissed,
@@ -264,8 +264,6 @@ impl Store {
             ],
         )?;
 
-        // Build a per-finding rel_path lookup from findings_by_file so each
-        // finding row carries the relative path the UI uses.
         let mut rel_by_file_path = std::collections::HashMap::new();
         for ff in &result.findings_by_file {
             for f in &ff.findings {
@@ -273,7 +271,6 @@ impl Store {
             }
         }
 
-        // Index patches by finding_id.
         let mut patch_by_id: std::collections::HashMap<&str, &Patch> =
             std::collections::HashMap::new();
         for p in &result.patches {
@@ -415,8 +412,6 @@ impl Store {
             })
         })?;
 
-        // Reassemble: findings_by_file (grouped by rel_path), verified (with
-        // verdicts), patches.
         let mut findings_by_file: std::collections::BTreeMap<String, Vec<Finding>> =
             Default::default();
         let mut verified: Vec<VerifiedFinding> = Vec::new();
@@ -791,19 +786,17 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let root = "/tmp/proj";
 
-        // First: dismiss with a reason.
         store
             .set_triage("abc", root, TriageStatus::Dismissed, Some("false positive"), None)
             .unwrap();
-        // Second: same key, switch to accepted (UPSERT).
+        // Same key, different status — must overwrite, not error.
         store
             .set_triage("abc", root, TriageStatus::Accepted, None, None)
             .unwrap();
-        // Different finding in same root: snooze.
         store
             .set_triage("def", root, TriageStatus::Snoozed, None, Some(9_999_999))
             .unwrap();
-        // Different root: shouldn't appear.
+        // Different root: must not appear in the per-root query below.
         store
             .set_triage("abc", "/tmp/other", TriageStatus::Dismissed, Some("x"), None)
             .unwrap();

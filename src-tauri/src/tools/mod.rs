@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired up by Step 4 agent loop
-
 pub mod blame;
 pub mod fs_tools;
 pub mod imports;
@@ -176,22 +174,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn all_tool_names_dispatch() {
-        // Smoke check: every defined tool has a dispatch arm.
-        let names: Vec<&str> = tool_definitions().iter().map(|t| t.name.as_str().to_owned()).collect::<Vec<String>>().iter().map(|s| Box::leak(s.clone().into_boxed_str()) as &str).collect();
-        // We can't easily test dispatch without scan_root + fs setup,
-        // but we can ensure the names match the registered constants.
-        for n in &[
-            READ_FILE,
-            READ_FILE_RANGE,
-            GREP,
-            FIND_REFERENCES,
-            LIST_DIRECTORY,
-            LIST_IMPORTS,
-            GIT_BLAME,
-        ] {
-            assert!(names.contains(n), "missing dispatch for {n}");
-        }
-    }
 }

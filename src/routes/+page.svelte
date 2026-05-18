@@ -1,18 +1,20 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 
-	import { Button } from '$lib/components/ui/button';
 	import ApiKeyPrompt from '$lib/components/ApiKeyPrompt.svelte';
 	import FileTree from '$lib/components/FileTree.svelte';
 	import FindingDetail from '$lib/components/FindingDetail.svelte';
 	import FileStatusDetail from '$lib/components/FileStatusDetail.svelte';
 	import FindingsList from '$lib/components/FindingsList.svelte';
 	import Launcher from '$lib/components/Launcher.svelte';
+	import OnboardingPanel from '$lib/components/OnboardingPanel.svelte';
+	import PipelineProgress from '$lib/components/PipelineProgress.svelte';
 	import ScanSummary from '$lib/components/ScanSummary.svelte';
 	import Settings from '$lib/components/Settings.svelte';
 	import WorkspaceTopBar from '$lib/components/WorkspaceTopBar.svelte';
 	import { asScanConfig, settings } from '$lib/settings.svelte';
 	import { highlightCode, highlightDiff } from '$lib/shiki.svelte';
+	import { stageIndex } from '$lib/pipeline';
 	import {
 		EMPTY_STAGE_USAGE,
 		EMPTY_STAGE_DURATIONS,
@@ -633,28 +635,7 @@
 		selectedFile ? findFileNode(fileTree, selectedFile) : null
 	);
 
-	// ---------- stages / progress ---------------------------------------
-	type StageSlot = { key: string; label: string; model: string | null };
-	const PIPELINE_STAGES: StageSlot[] = [
-		{ key: 'ingest', label: 'Ingest', model: null },
-		{ key: 'triage', label: 'Triage', model: 'Haiku' },
-		{ key: 'detect', label: 'Detect', model: 'Sonnet' },
-		{ key: 'verify', label: 'Verify', model: 'Opus' },
-		{ key: 'patch', label: 'Patch', model: 'Sonnet' }
-	];
-
-	let stageIndex = $derived.by(() => {
-		if (stage === 'idle' || stage === 'starting…') return -1;
-		if (stage === 'scanning…') return 0;
-		if (stage.startsWith('triaging')) return 1;
-		if (stage.startsWith('detecting')) return 2;
-		if (stage.startsWith('verifying')) return 3;
-		if (stage.startsWith('proposing')) return 4;
-		if (stage === 'done' || stage === 'cancelled') return 5;
-		return -1;
-	});
-
-	import { formatDuration } from '$lib/scan-display';
+	let currentStageIndex = $derived(stageIndex(stage));
 
 	// ---------- summary totals ------------------------------------------
 	let totals = $derived.by(() => {
@@ -905,226 +886,16 @@
 		{/if}
 
 		{#if showProgress}
-			<div class="border-border bg-muted/20 flex items-center gap-3 border-b px-4 py-2">
-				<ol class="flex flex-1 items-center gap-1">
-					{#each PIPELINE_STAGES as s, i (s.key)}
-						{@const state = stageIndex === 5
-							? 'done'
-							: i < stageIndex
-								? 'done'
-								: i === stageIndex
-									? 'active'
-									: 'pending'}
-						<li class="flex items-center gap-1">
-							<div
-								class="flex items-center gap-1.5 rounded px-2 py-1 {state === 'active'
-									? 'bg-foreground text-background'
-									: state === 'done'
-										? 'text-foreground'
-										: 'text-muted-foreground/60'}"
-							>
-								<span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-									{#if state === 'done'}
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											width="10"
-											height="10"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="3"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M20 6 9 17l-5-5" />
-										</svg>
-									{:else if state === 'active'}
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											width="10"
-											height="10"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="2.5"
-											class="animate-spin"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M21 12a9 9 0 1 1-6.2-8.55" />
-										</svg>
-									{:else}
-										<span class="font-mono text-[0.625rem]">{i + 1}</span>
-									{/if}
-								</span>
-								<span class="text-xs font-medium">{s.label}</span>
-							</div>
-							{#if i < PIPELINE_STAGES.length - 1}
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									width="10"
-									height="10"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="text-muted-foreground/30"
-								>
-									<path d="m9 18 6-6-6-6" />
-								</svg>
-							{/if}
-						</li>
-					{/each}
-				</ol>
-				{#if rateLimitNotice}
-					<span
-						class="shrink-0 inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 font-mono text-xs text-amber-700 dark:text-amber-300"
-						title="Anthropic rate limit; auto-retrying"
-					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							width="10"
-							height="10"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.5"
-							class="animate-spin"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M21 12a9 9 0 1 1-6.2-8.55" />
-						</svg>
-						rate-limited · retry #{rateLimitNotice.attempt} in {rateLimitNotice.retry_after_secs}s
-					</span>
-				{/if}
-				{#if durations.total_ms > 0}
-					<span
-						class="text-muted-foreground shrink-0 font-mono text-xs"
-						title="Total scan duration"
-					>
-						{formatDuration(durations.total_ms)}
-					</span>
-				{/if}
-				<span class="text-muted-foreground shrink-0 font-mono text-xs">{stage}</span>
-			</div>
+			<PipelineProgress
+				stageIndex={currentStageIndex}
+				{stage}
+				{rateLimitNotice}
+				{durations}
+			/>
 		{/if}
 
 		{#if showOnboarding}
-			<div class="flex flex-1 items-center justify-center overflow-y-auto px-8 py-10">
-				<div class="flex w-full max-w-3xl flex-col gap-6">
-					<div class="space-y-1.5">
-						<h2 class="text-xl font-semibold tracking-tight">Ready to scan</h2>
-						<p class="text-muted-foreground text-sm">
-							An AI pipeline reads this folder and drafts patches. Nothing touches disk until
-							you approve.
-						</p>
-					</div>
-
-					<div
-						class="border-border bg-muted/30 flex items-center gap-3 rounded-md border px-3.5 py-2.5"
-					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							width="14"
-							height="14"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							class="text-muted-foreground shrink-0"
-						>
-							<path
-								d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-							/>
-						</svg>
-						<span class="truncate font-mono text-xs" title={root}>{root || '—'}</span>
-					</div>
-
-					<section class="space-y-2.5">
-						<h3
-							class="text-muted-foreground text-[0.625rem] font-medium uppercase tracking-wider"
-						>
-							Pipeline
-						</h3>
-						<div class="flex items-stretch gap-1.5">
-							{#each [{ n: '1', name: 'Ingest', model: null, desc: 'Walk & filter' }, { n: '2', name: 'Triage', model: 'Haiku', desc: 'Prioritize' }, { n: '3', name: 'Detect', model: 'Sonnet', desc: 'Find issues' }, { n: '4', name: 'Verify', model: 'Opus', desc: 'Confirm exploits' }, { n: '5', name: 'Patch', model: 'Sonnet', desc: 'Draft fixes' }] as step, i (step.n)}
-								<div
-									class="border-border bg-background flex flex-1 flex-col gap-1 rounded-md border px-3 py-2.5"
-								>
-									<div class="flex items-center justify-between">
-										<span class="text-muted-foreground/70 font-mono text-[0.625rem]">
-											{step.n}
-										</span>
-										{#if step.model}
-											<span
-												class="text-muted-foreground/70 font-mono text-[0.5625rem] uppercase tracking-wider"
-											>
-												{step.model}
-											</span>
-										{/if}
-									</div>
-									<div class="text-sm font-medium">{step.name}</div>
-									<div class="text-muted-foreground text-[0.6875rem]">{step.desc}</div>
-								</div>
-								{#if i < 4}
-									<div class="text-muted-foreground/50 flex items-center">
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											width="10"
-											height="10"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="2.5"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="m9 18 6-6-6-6" />
-										</svg>
-									</div>
-								{/if}
-							{/each}
-						</div>
-					</section>
-
-					<div class="space-y-2">
-						<Button
-							size="lg"
-							onclick={runScan}
-							disabled={!root || !keyConfigured}
-							class="w-full"
-						>
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								width="14"
-								height="14"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								class="mr-2"
-							>
-								<polygon points="6 3 20 12 6 21 6 3" />
-							</svg>
-							Start scan
-						</Button>
-						<p class="text-muted-foreground text-center text-xs">
-							{#if !keyConfigured}
-								Add your Anthropic API key above to enable scanning.
-							{:else}
-								Typically a few cents and under a minute for a small project.
-							{/if}
-						</p>
-					</div>
-				</div>
-			</div>
+			<OnboardingPanel {root} {keyConfigured} onScan={runScan} />
 		{:else}
 			<div
 				class="grid flex-1 grid-cols-[260px_minmax(320px,1fr)_minmax(400px,1.4fr)] overflow-hidden"

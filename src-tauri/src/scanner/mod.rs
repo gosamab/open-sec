@@ -1,8 +1,7 @@
-#![allow(dead_code)] // wired up incrementally as Step 4+ land
-
 pub mod detect;
 pub mod excerpts;
 pub mod ingest;
+pub mod languages;
 pub mod orchestrate;
 pub mod patch;
 pub mod triage;

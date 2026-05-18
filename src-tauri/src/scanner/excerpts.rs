@@ -1,17 +1,15 @@
-//! Extract a code excerpt for a finding's line range. When the file is in a
-//! tree-sitter-supported language, walks up from the target span to find the
-//! smallest enclosing function / class / method and returns that. For other
-//! languages (or when no enclosing node exists), falls back to a `±N` line
-//! window around the range.
-//!
-//! Computed on demand at view time (no persistence yet) — the UI calls
-//! `get_excerpt` when a finding is selected.
+//! Extract a code excerpt for a finding's line range. For tree-sitter
+//! languages, walks up to the smallest enclosing function/class/etc.
+//! Otherwise falls back to a `±N` line window. Computed on demand by the
+//! `get_excerpt` IPC when a finding is selected.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Node, Parser};
+
+use super::languages::{lang_for_path, shiki_lang_for_path, Lang};
 
 /// Lines of context above / below the target span when falling back to a
 /// plain line-window excerpt.
@@ -37,166 +35,13 @@ pub struct Excerpt {
     pub source: ExcerptSource,
 }
 
-#[derive(Clone, Copy)]
-enum Lang {
-    Rust,
-    JavaScript,
-    Typescript,
-    Tsx,
-    Python,
-    Dart,
-    Java,
-    CSharp,
-    Html,
-}
-
-fn language_for(path: &Path) -> Option<Lang> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "rs" => Lang::Rust,
-        "ts" | "mts" | "cts" => Lang::Typescript,
-        "tsx" => Lang::Tsx,
-        "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
-        "py" => Lang::Python,
-        "dart" => Lang::Dart,
-        "java" => Lang::Java,
-        "cs" => Lang::CSharp,
-        "html" | "htm" => Lang::Html,
-        _ => return None,
-    })
-}
-
-fn tree_sitter_language(lang: Lang) -> Language {
-    match lang {
-        Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-        Lang::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        Lang::Python => tree_sitter_python::LANGUAGE.into(),
-        Lang::Dart => tree_sitter_dart::LANGUAGE.into(),
-        Lang::Java => tree_sitter_java::LANGUAGE.into(),
-        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-        Lang::Html => tree_sitter_html::LANGUAGE.into(),
-    }
-}
-
-/// Node kinds that count as an "enclosing function/class" for excerpt
-/// purposes. Conservative — we'd rather walk further up than not at all.
-fn is_enclosing(lang: Lang, kind: &str) -> bool {
-    match lang {
-        Lang::Rust => matches!(
-            kind,
-            "function_item"
-                | "function_signature_item"
-                | "impl_item"
-                | "trait_item"
-                | "struct_item"
-                | "enum_item"
-                | "mod_item"
-                | "closure_expression"
-        ),
-        Lang::JavaScript | Lang::Typescript | Lang::Tsx => matches!(
-            kind,
-            "function_declaration"
-                | "function_expression"
-                | "function"
-                | "generator_function_declaration"
-                | "generator_function"
-                | "arrow_function"
-                | "method_definition"
-                | "method_signature"
-                | "class_declaration"
-                | "class_expression"
-        ),
-        Lang::Python => matches!(kind, "function_definition" | "class_definition"),
-        Lang::Dart => matches!(
-            kind,
-            "function_signature"
-                | "function_body"
-                | "method_signature"
-                | "getter_signature"
-                | "setter_signature"
-                | "constructor_signature"
-                | "class_definition"
-                | "mixin_declaration"
-                | "extension_declaration"
-                | "function_expression"
-        ),
-        Lang::Java => matches!(
-            kind,
-            "method_declaration"
-                | "constructor_declaration"
-                | "class_declaration"
-                | "interface_declaration"
-                | "enum_declaration"
-                | "annotation_type_declaration"
-                | "record_declaration"
-                | "lambda_expression"
-        ),
-        Lang::CSharp => matches!(
-            kind,
-            "method_declaration"
-                | "constructor_declaration"
-                | "destructor_declaration"
-                | "local_function_statement"
-                | "class_declaration"
-                | "interface_declaration"
-                | "struct_declaration"
-                | "record_declaration"
-                | "enum_declaration"
-                | "delegate_declaration"
-                | "namespace_declaration"
-                | "lambda_expression"
-        ),
-        // HTML doesn't really have "functions" — only walk up to <script> /
-        // <style> blocks; anything else falls back to the line window.
-        Lang::Html => matches!(kind, "script_element" | "style_element"),
-    }
-}
-
-/// Shiki lang hint string for the frontend. Returns None for unknown
-/// extensions; the UI then falls back to no syntax highlighting.
-fn shiki_lang(path: &Path) -> Option<String> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(
-        match ext.as_str() {
-            "ts" | "mts" | "cts" => "typescript",
-            "tsx" => "tsx",
-            "js" | "mjs" | "cjs" => "javascript",
-            "jsx" => "jsx",
-            "rs" => "rust",
-            "py" => "python",
-            "go" => "go",
-            "java" => "java",
-            "kt" => "kotlin",
-            "swift" => "swift",
-            "cs" => "csharp",
-            "rb" => "ruby",
-            "php" => "php",
-            "c" | "h" => "c",
-            "cc" | "cpp" | "cxx" | "hpp" => "cpp",
-            "m" | "mm" => "objective-c",
-            "dart" => "dart",
-            "yml" | "yaml" => "yaml",
-            "tf" | "hcl" => "hcl",
-            "sh" => "bash",
-            "svelte" => "svelte",
-            "vue" => "vue",
-            "html" | "htm" => "html",
-            _ => return None,
-        }
-        .to_string(),
-    )
-}
-
 /// Compute the excerpt for `file` at `line_start..=line_end`.
 pub fn extract(file: &Path, line_start: u32, line_end: u32) -> Result<Excerpt> {
     let source = std::fs::read_to_string(file)
         .map_err(|e| anyhow!("read {}: {e}", file.display()))?;
-    let shiki = shiki_lang(file);
-    let ts_lang = language_for(file);
+    let shiki = shiki_lang_for_path(file).map(String::from);
 
-    if let Some(lang) = ts_lang {
+    if let Some(lang) = lang_for_path(file) {
         if let Some(ex) = extract_enclosing(&source, lang, line_start, line_end, shiki.clone()) {
             return Ok(ex);
         }
@@ -212,7 +57,7 @@ fn extract_enclosing(
     line_end: u32,
     shiki: Option<String>,
 ) -> Option<Excerpt> {
-    let ts_lang = tree_sitter_language(lang);
+    let ts_lang = lang.tree_sitter_language();
     let mut parser = Parser::new();
     parser.set_language(&ts_lang).ok()?;
     let tree = parser.parse(source, None)?;
@@ -272,7 +117,7 @@ fn line_range_to_bytes(source: &str, line_start: u32, line_end: u32) -> (usize, 
 
 fn walk_up_to_enclosing<'a>(mut node: Node<'a>, lang: Lang) -> Option<Node<'a>> {
     loop {
-        if is_enclosing(lang, node.kind()) {
+        if lang.is_enclosing(node.kind()) {
             return Some(node);
         }
         node = node.parent()?;
@@ -311,11 +156,6 @@ fn line_window(
         text: slice.join("\n"),
         source: ExcerptSource::LineRange,
     }
-}
-
-pub fn extract_from_str(file_path: &str, line_start: u32, line_end: u32) -> Result<Excerpt> {
-    let p = PathBuf::from(file_path);
-    extract(&p, line_start, line_end)
 }
 
 #[cfg(test)]

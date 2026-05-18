@@ -241,6 +241,19 @@ export const DEFAULT_FINDINGS_FILTER: FindingsFilter = {
 	kind: 'all'
 };
 
+/** All finding statuses with their display labels. Used in the FindingsList
+ *  filter dropdown and the ScanSummary breakdown — keep them in sync here. */
+export const STATUS_OPTIONS: { key: FindingStatus; label: string }[] = [
+	{ key: 'open', label: 'Open' },
+	{ key: 'patched', label: 'Patched' },
+	{ key: 'accepted', label: 'Accepted' },
+	{ key: 'snoozed', label: 'Snoozed' },
+	{ key: 'dismissed', label: 'Dismissed' },
+	{ key: 'dropped', label: 'Dropped' },
+	{ key: 'pending', label: 'Pending' },
+	{ key: 'verifying', label: 'Verifying' }
+];
+
 /** Count of "narrowing" axes a user has applied — to badge the filter button.
  *  Sort changes don't count as filtering. */
 export function activeFilterCount(f: FindingsFilter): number {

@@ -1,7 +1,12 @@
 <script lang="ts">
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import { DEFAULT_SETTINGS, settings, type ScanSettings } from '$lib/settings.svelte';
+	import {
+		CONCURRENCY_BOUNDS,
+		DEFAULT_SETTINGS,
+		settings,
+		type ScanSettings
+	} from '$lib/settings.svelte';
 
 	interface Props {
 		onClose: () => void;
@@ -122,8 +127,8 @@
 					<Input
 						id="c-triage"
 						type="number"
-						min="1"
-						max="32"
+						min={CONCURRENCY_BOUNDS.triage_concurrency.min}
+						max={CONCURRENCY_BOUNDS.triage_concurrency.max}
 						bind:value={draft.triage_concurrency}
 						class="h-8 text-xs"
 					/>
@@ -133,8 +138,8 @@
 					<Input
 						id="c-detect"
 						type="number"
-						min="1"
-						max="16"
+						min={CONCURRENCY_BOUNDS.detect_concurrency.min}
+						max={CONCURRENCY_BOUNDS.detect_concurrency.max}
 						bind:value={draft.detect_concurrency}
 						class="h-8 text-xs"
 					/>
@@ -144,8 +149,8 @@
 					<Input
 						id="c-verify"
 						type="number"
-						min="1"
-						max="8"
+						min={CONCURRENCY_BOUNDS.verify_concurrency.min}
+						max={CONCURRENCY_BOUNDS.verify_concurrency.max}
 						bind:value={draft.verify_concurrency}
 						class="h-8 text-xs"
 					/>
@@ -155,8 +160,8 @@
 					<Input
 						id="c-patch"
 						type="number"
-						min="1"
-						max="8"
+						min={CONCURRENCY_BOUNDS.patch_concurrency.min}
+						max={CONCURRENCY_BOUNDS.patch_concurrency.max}
 						bind:value={draft.patch_concurrency}
 						class="h-8 text-xs"
 					/>

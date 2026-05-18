@@ -8,7 +8,7 @@ use crate::providers::{
     CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
     SystemBlock,
 };
-use crate::scanner::util::{collect_text, extract_json_object};
+use crate::scanner::util::{collect_text, extract_json_object, with_line_numbers};
 use crate::scanner::Finding;
 use crate::tools;
 
@@ -214,17 +214,6 @@ fn finalize(text: &str, file_label: &str) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-fn with_line_numbers(source: &str) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let width = lines.len().to_string().len().max(3);
-    let mut out = String::with_capacity(source.len() + lines.len() * (width + 3));
-    for (i, line) in lines.iter().enumerate() {
-        use std::fmt::Write;
-        let _ = writeln!(&mut out, "{:>width$}| {}", i + 1, line, width = width);
-    }
-    out
-}
-
 #[cfg(test)]
 mod agent_tests {
     use super::*;
@@ -371,16 +360,3 @@ mod agent_tests {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn line_numbers_pad_to_width() {
-        let out = with_line_numbers("a\nb\nc");
-        // 3 lines → width 3
-        assert!(out.starts_with("  1| a\n"));
-        assert!(out.contains("  2| b\n"));
-        assert!(out.contains("  3| c"));
-    }
-}

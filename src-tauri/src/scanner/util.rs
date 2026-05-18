@@ -1,8 +1,35 @@
-//! Helpers shared between the scanner stages (detect / triage / verify) for
-//! parsing strict-JSON model output and assembling text from Anthropic
-//! content blocks. Internal to the scanner module.
+//! Helpers shared between scanner stages — parsing strict-JSON model output,
+//! collecting text from content blocks, line-numbering source for the model,
+//! and resolving a finding's file path against the scan root.
+
+use std::path::{Path, PathBuf};
 
 use crate::providers::ContentBlock;
+
+/// If `file` is an absolute path that already lives inside `root`, return
+/// it as-is. Otherwise treat it as a relative path under `root`. Used by
+/// verify and patch when feeding the model the focus file.
+pub(super) fn resolve_focus_path(root: &Path, file: &str) -> PathBuf {
+    let p = PathBuf::from(file);
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
+}
+
+/// Prefix every line of `source` with its 1-based number so the model can
+/// emit precise line refs without us having to teach it our line policy.
+pub(super) fn with_line_numbers(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let width = lines.len().to_string().len().max(3);
+    let mut out = String::with_capacity(source.len() + lines.len() * (width + 3));
+    for (i, line) in lines.iter().enumerate() {
+        use std::fmt::Write;
+        let _ = writeln!(&mut out, "{:>width$}| {}", i + 1, line, width = width);
+    }
+    out
+}
 
 /// Join all `text` blocks in a model response. Tool-use / tool-result blocks
 /// are intentionally dropped — callers handle those separately.
@@ -139,5 +166,13 @@ mod tests {
     #[test]
     fn extract_handles_empty_object() {
         assert_eq!(extract_json_object("{}"), Some("{}"));
+    }
+
+    #[test]
+    fn line_numbers_pad_to_width() {
+        let out = with_line_numbers("a\nb\nc");
+        assert!(out.starts_with("  1| a\n"));
+        assert!(out.contains("  2| b\n"));
+        assert!(out.contains("  3| c"));
     }
 }

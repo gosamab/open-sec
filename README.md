@@ -28,7 +28,7 @@ Results persist to SQLite at `<app_data_dir>/open-sec.db`. Re-scanning the same 
 ## Requirements
 
 - macOS 11 or later (Apple Silicon or Intel). Windows / Linux planned.
-- Anthropic API key (stored in the macOS Keychain).
+- Anthropic API key (stored locally at `<app_data_dir>/anthropic-api-key` with `0600` permissions).
 
 ## Usage
 
@@ -63,7 +63,7 @@ cargo test --lib       # pipeline tests
 
 - **Shell** — Tauri v2
 - **Frontend** — SvelteKit + TypeScript + Tailwind v4 + shadcn-svelte
-- **Backend** — Rust + tokio, `reqwest`, `rusqlite`, `tree-sitter`, `diffy`, `keyring`
+- **Backend** — Rust + tokio, `reqwest`, `rusqlite`, `tree-sitter`, `diffy`
 - **Models** — Claude `haiku-4-5` / `sonnet-4-6` / `opus-4-7`
 
 ## Privacy

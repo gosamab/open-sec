@@ -27,10 +27,11 @@ If you do not want a particular file or directory scanned, exclude it via
 
 ## What stays on your device
 
-- **Anthropic API key** — stored in the macOS Keychain under the service name
-  `open-sec`, account `anthropic`. Never written to disk in plaintext, never
-  sent anywhere except as the `x-api-key` header on requests to
-  `api.anthropic.com`.
+- **Anthropic API key** — stored on disk at
+  `~/Library/Application Support/com.oazab.open-sec/anthropic-api-key`
+  with `0600` (user-only) permissions. Never sent anywhere except as the
+  `x-api-key` header on requests to `api.anthropic.com`. Delete this file
+  to forget the key.
 - **Scan history and findings** — stored in a local SQLite database at
   `<app_data_dir>/open-sec.db` (on macOS: `~/Library/Application Support/com.oazab.open-sec/open-sec.db`).
   This includes finding text, verdicts, patch proposals, and your

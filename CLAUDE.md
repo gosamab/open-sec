@@ -87,9 +87,13 @@ SQLite via `rusqlite` (bundled, no `tauri-plugin-sql`) at
 (`Verdict`, `Patch`) live in JSON columns because they're always read with
 their `Finding` and never queried internally.
 
-API keys live in the OS keychain (`keyring` crate, service `open-sec`,
-account `anthropic`). `ANTHROPIC_API_KEY` env var is a dev fallback loaded
-by `dotenvy`.
+API key lives on disk at `<app_data_dir>/anthropic-api-key` with 0600
+perms ([`config.rs`](src-tauri/src/config.rs)). The Keychain would be
+tighter, but its ACL is keyed off the binary's code signature — unsigned
+`tauri build`s get a fresh ad-hoc signature each time, so `set_password`
+succeeds in-process and the next launch can't read it back. A plain
+user-only file survives rebuilds. `ANTHROPIC_API_KEY` env var is a dev
+fallback loaded by `dotenvy`.
 
 ## Frontend
 

@@ -1,6 +1,6 @@
 import DOMPurify from 'isomorphic-dompurify';
 import { Marked } from 'marked';
-import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '$lib/ipc';
 
 // Inline-only mode for short fragments (badge labels, single sentences with
 // backticks) — strips the wrapping <p>.
@@ -93,8 +93,8 @@ export function installExternalLinkHandler(): void {
 		const href = anchor.getAttribute('href');
 		if (!href) return;
 		e.preventDefault();
-		void invoke<void>('open_url', { url: href }).catch((err) => {
-			console.warn('open_url failed', err);
+		void openUrl(href).catch((err: unknown) => {
+			console.warn('openUrl failed', err);
 		});
 	});
 }

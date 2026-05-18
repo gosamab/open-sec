@@ -89,8 +89,6 @@ export function buildFileNodes(s: BuildInputs): FileNode[] {
 		}
 		// Pre-triage skipped (vendor dir, binary, minified, too large, io error).
 		for (const sk of s.walk.skipped) {
-			// Skip pure unsupported_ext — they aren't useful to show in tree.
-			if (sk.reason === 'unsupported_ext') continue;
 			map.set(sk.rel_path, {
 				type: 'file',
 				path: sk.rel_path,

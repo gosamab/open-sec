@@ -54,12 +54,6 @@ impl CancelHandle {
 }
 
 #[tauri::command]
-pub fn greet(name: String) -> Result<String, String> {
-    info!(name = %name, "greet command invoked");
-    Ok(format!("Hello, {name}! open-sec is alive."))
-}
-
-#[tauri::command]
 pub fn has_anthropic_key() -> bool {
     config::has_anthropic_key()
 }
@@ -296,14 +290,6 @@ fn latest_scan_id_for(store: &Store, root: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no persisted scan found for {root}"))
 }
 
-/// IPC: find and load the most recent scan for `root`. Used by the report
-/// window so it can pull a fresh scan without paging through every group.
-#[tauri::command]
-pub fn get_latest_scan_for(store: State<'_, Store>, root: String) -> Result<ScanResult, String> {
-    let id = latest_scan_id_for(store.inner(), &root)?;
-    store.load_scan(&id).map_err(|e| format!("{e:#}"))
-}
-
 /// Render a markdown report for the latest persisted scan of `root`.
 #[tauri::command]
 pub fn export_markdown(store: State<'_, Store>, root: String) -> Result<String, String> {
@@ -343,12 +329,6 @@ pub fn list_scan_groups(
 #[tauri::command]
 pub fn load_scan(store: State<'_, Store>, scan_id: String) -> Result<ScanResult, String> {
     store.load_scan(&scan_id).map_err(|e| format!("{e:#}"))
-}
-
-/// Remove a single scan by id (cascades to its findings).
-#[tauri::command]
-pub fn delete_scan(store: State<'_, Store>, scan_id: String) -> Result<(), String> {
-    store.delete_scan(&scan_id).map_err(|e| format!("{e:#}"))
 }
 
 /// Remove every scan for a given root — used by the launcher's "remove from

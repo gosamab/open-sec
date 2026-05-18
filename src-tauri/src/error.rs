@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired up incrementally as Step 3+ land
-
 use std::time::Duration;
 use thiserror::Error;
 
@@ -22,9 +20,6 @@ pub enum ProviderError {
 
     #[error("decode error: {0}")]
     Decode(#[from] serde_json::Error),
-
-    #[error("stream error: {0}")]
-    Stream(String),
 
     #[error("cancelled")]
     Cancelled,

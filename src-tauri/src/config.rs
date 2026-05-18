@@ -1,5 +1,3 @@
-#![allow(dead_code)] // expanded in later steps (config.toml model overrides etc.)
-
 use anyhow::{anyhow, Result};
 
 const KEYRING_SERVICE: &str = "open-sec";
@@ -25,12 +23,6 @@ pub fn load_anthropic_key() -> Result<String> {
 pub fn store_anthropic_key(key: &str) -> Result<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
     entry.set_password(key)?;
-    Ok(())
-}
-
-pub fn delete_anthropic_key() -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
-    entry.delete_credential()?;
     Ok(())
 }
 

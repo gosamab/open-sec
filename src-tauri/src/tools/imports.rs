@@ -48,6 +48,10 @@ enum Lang {
     Typescript,
     Tsx,
     Python,
+    Dart,
+    Java,
+    CSharp,
+    Html,
 }
 
 fn language_for(path: &Path) -> Option<Lang> {
@@ -58,6 +62,10 @@ fn language_for(path: &Path) -> Option<Lang> {
         "tsx" => Lang::Tsx,
         "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
         "py" => Lang::Python,
+        "dart" => Lang::Dart,
+        "java" => Lang::Java,
+        "cs" => Lang::CSharp,
+        "html" | "htm" => Lang::Html,
         _ => return None,
     })
 }
@@ -69,6 +77,10 @@ fn tree_sitter_language(lang: Lang) -> Language {
         Lang::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         Lang::Python => tree_sitter_python::LANGUAGE.into(),
+        Lang::Dart => tree_sitter_dart::LANGUAGE.into(),
+        Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Html => tree_sitter_html::LANGUAGE.into(),
     }
 }
 
@@ -89,6 +101,27 @@ fn query_for(lang: Lang) -> &'static str {
             r#"
             (import_statement) @import
             (import_from_statement) @import
+            "#
+        }
+        // `import 'package:foo/bar.dart';` plus part / export.
+        Lang::Dart => {
+            r#"
+            (import_or_export) @import
+            "#
+        }
+        Lang::Java => "(import_declaration) @import",
+        Lang::CSharp => "(using_directive) @import",
+        // <script src=…> tags plus any tag with src/href so external
+        // references (link, img, iframe, etc.) surface.
+        Lang::Html => {
+            r#"
+            (script_element) @import
+            (start_tag
+                (attribute (attribute_name) @attr)
+                (#match? @attr "^(src|href)$")) @import
+            (self_closing_tag
+                (attribute (attribute_name) @attr2)
+                (#match? @attr2 "^(src|href)$")) @import
             "#
         }
     }
@@ -158,6 +191,26 @@ mod tests {
             "use std::path::Path;\nuse anyhow::{Context, Result};\n",
         )
         .unwrap();
+        fs::write(
+            root.join("a.dart"),
+            "import 'package:flutter/material.dart';\nimport 'dart:io';\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("A.java"),
+            "package com.example;\nimport java.util.List;\nimport java.io.*;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("a.cs"),
+            "using System;\nusing System.Collections.Generic;\nnamespace Foo {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("a.html"),
+            "<html><head><script src=\"app.js\"></script><link href=\"main.css\" rel=\"stylesheet\"></head></html>\n",
+        )
+        .unwrap();
         fs::write(root.join("a.txt"), "no language").unwrap();
         (tmp, root)
     }
@@ -186,6 +239,38 @@ mod tests {
         let out = list_imports(&json!({"path": "a.rs"}), &root).await.unwrap();
         assert!(out.contains("use std::path::Path;"));
         assert!(out.contains("use anyhow::{Context, Result};"));
+    }
+
+    #[tokio::test]
+    async fn dart_imports() {
+        let (_tmp, root) = setup();
+        let out = list_imports(&json!({"path": "a.dart"}), &root).await.unwrap();
+        assert!(out.contains("package:flutter/material.dart"));
+        assert!(out.contains("dart:io"));
+    }
+
+    #[tokio::test]
+    async fn java_imports() {
+        let (_tmp, root) = setup();
+        let out = list_imports(&json!({"path": "A.java"}), &root).await.unwrap();
+        assert!(out.contains("java.util.List"));
+        assert!(out.contains("java.io"));
+    }
+
+    #[tokio::test]
+    async fn csharp_imports() {
+        let (_tmp, root) = setup();
+        let out = list_imports(&json!({"path": "a.cs"}), &root).await.unwrap();
+        assert!(out.contains("using System;"));
+        assert!(out.contains("System.Collections.Generic"));
+    }
+
+    #[tokio::test]
+    async fn html_imports() {
+        let (_tmp, root) = setup();
+        let out = list_imports(&json!({"path": "a.html"}), &root).await.unwrap();
+        assert!(out.to_lowercase().contains("script") || out.contains("src=\"app.js\""));
+        assert!(out.to_lowercase().contains("link") || out.contains("href=\"main.css\""));
     }
 
     #[tokio::test]

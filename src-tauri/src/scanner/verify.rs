@@ -378,10 +378,9 @@ fn with_line_numbers(source: &str) -> String {
 mod tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Response, StreamEvent, Usage};
+    use crate::providers::{Response, Usage};
     use crate::scanner::Severity;
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -408,12 +407,6 @@ mod tests {
                 panic!("ScriptedProvider out of responses");
             }
             Ok(r.remove(0))
-        }
-        async fn stream(
-            &self,
-            _req: GenerationRequest,
-        ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-            unimplemented!()
         }
     }
 

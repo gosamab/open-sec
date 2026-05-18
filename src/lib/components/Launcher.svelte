@@ -2,15 +2,9 @@
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { Button } from '$lib/components/ui/button';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import ApiKeyPrompt from '$lib/components/ApiKeyPrompt.svelte';
 	import logo from '$lib/assets/logo.png';
-	import {
-		deleteScansForRoot,
-		hasAnthropicKey,
-		listScanGroups,
-		setAnthropicKey,
-		type ScanGroup
-	} from '$lib/ipc';
-	import { Input } from '$lib/components/ui/input';
+	import { deleteScansForRoot, hasAnthropicKey, listScanGroups, type ScanGroup } from '$lib/ipc';
 	import { onMount } from 'svelte';
 
 	interface Props {
@@ -20,9 +14,6 @@
 	let { onOpenFresh, onOpenPast }: Props = $props();
 
 	let keyConfigured = $state(false);
-	let keyInput = $state('');
-	let savingKey = $state(false);
-	let keyError = $state<string | null>(null);
 
 	let groups = $state<ScanGroup[]>([]);
 	let loadingGroups = $state(true);
@@ -109,19 +100,8 @@
 		await reloadGroups();
 	}
 
-	async function saveKey() {
-		if (!keyInput.trim()) return;
-		savingKey = true;
-		keyError = null;
-		try {
-			await setAnthropicKey(keyInput.trim());
-			keyConfigured = await hasAnthropicKey();
-			keyInput = '';
-		} catch (e) {
-			keyError = e instanceof Error ? e.message : String(e);
-		} finally {
-			savingKey = false;
-		}
+	async function refreshKeyState() {
+		keyConfigured = await hasAnthropicKey();
 	}
 </script>
 
@@ -146,32 +126,7 @@
 		</div>
 
 		{#if !keyConfigured}
-			<div
-				class="border-amber-300/40 bg-amber-50/40 dark:border-amber-500/30 dark:bg-amber-950/20 space-y-2 rounded-md border p-4"
-			>
-				<div class="space-y-1">
-					<p class="text-sm font-medium">Anthropic API key required</p>
-					<p class="text-muted-foreground text-xs">
-						Stored in the OS keychain. Or set <code class="font-mono">ANTHROPIC_API_KEY</code> in a
-						<code class="font-mono">.env</code> file at the project root.
-					</p>
-				</div>
-				<div class="flex gap-2">
-					<Input
-						type="password"
-						bind:value={keyInput}
-						placeholder="sk-ant-…"
-						autocomplete="off"
-						class="h-8 text-xs"
-					/>
-					<Button size="sm" onclick={saveKey} disabled={savingKey || !keyInput.trim()}>
-						{savingKey ? 'Saving…' : 'Save'}
-					</Button>
-				</div>
-				{#if keyError}
-					<p class="text-destructive text-xs">{keyError}</p>
-				{/if}
-			</div>
+			<ApiKeyPrompt variant="card" onSaved={refreshKeyState} />
 		{/if}
 
 		<!-- New project -->

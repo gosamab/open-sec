@@ -561,11 +561,10 @@ fn with_line_numbers(source: &str) -> String {
 mod tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Response, StreamEvent, Usage};
+    use crate::providers::{Response, Usage};
     use crate::scanner::verify::Verdict;
     use crate::scanner::Severity;
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -707,7 +706,37 @@ mod tests {
         assert!(patch.diff.is_none());
     }
 
-    // --- propose_many filter -------------------------------------------
+    // --- should_patch ---------------------------------------------------
+
+    fn mk_vf(kind: FindingKind, verify_keep: Option<bool>) -> VerifiedFinding {
+        let finding = mk_finding("focus.ts", kind);
+        let verdict = verify_keep.map(|keep| Verdict {
+            is_reachable: keep,
+            source_is_untrusted: true,
+            concrete_exploit: if keep {
+                Some(crate::scanner::verify::Exploit {
+                    kind: crate::scanner::verify::ExploitKind::Other,
+                    request: None,
+                    payload: "x".into(),
+                    expected_effect: "y".into(),
+                })
+            } else {
+                None
+            },
+            reasoning: "r".into(),
+        });
+        VerifiedFinding { finding, verdict }
+    }
+
+    #[test]
+    fn should_patch_decisions() {
+        assert!(should_patch(&mk_vf(FindingKind::Vuln, Some(true))));
+        assert!(!should_patch(&mk_vf(FindingKind::Vuln, Some(false))));
+        assert!(!should_patch(&mk_vf(FindingKind::Vuln, None)));
+        assert!(should_patch(&mk_vf(FindingKind::Hardening, None)));
+    }
+
+    // --- propose_many end-to-end ---------------------------------------
 
     struct OneShotProvider {
         body: Mutex<Option<String>>,
@@ -742,67 +771,26 @@ mod tests {
                 usage: Usage::default(),
             })
         }
-        async fn stream(
-            &self,
-            _req: GenerationRequest,
-        ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-            unimplemented!()
-        }
-    }
-
-    fn mk_vf(file: &str, kind: FindingKind, verify_keep: Option<bool>) -> VerifiedFinding {
-        let finding = mk_finding(file, kind);
-        let verdict = verify_keep.map(|keep| Verdict {
-            is_reachable: keep,
-            source_is_untrusted: true,
-            concrete_exploit: if keep {
-                Some(crate::scanner::verify::Exploit {
-                    kind: crate::scanner::verify::ExploitKind::Other,
-                    request: None,
-                    payload: "x".into(),
-                    expected_effect: "y".into(),
-                })
-            } else {
-                None
-            },
-            reasoning: "r".into(),
-        });
-        VerifiedFinding { finding, verdict }
     }
 
     #[tokio::test]
-    async fn propose_many_skips_dropped_vulns() {
+    async fn propose_many_filters_and_patches() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         std::fs::write(root.join("focus.ts"), "a\nb\nc\n").unwrap();
 
-        // Only one provider call should happen — the KEEP'd vuln. The
-        // dropped vuln gets skipped without calling the model.
+        // Only the KEEP'd vuln triggers a provider call; the dropped vuln is
+        // skipped without hitting the model.
         let provider: Arc<dyn Provider> = Arc::new(OneShotProvider::new(
             r#"{"file":"focus.ts","anchor_line":2,"old_block":"b\n","new_block":"B\n","explanation":"x"}"#,
         ));
 
         let verified = vec![
-            mk_vf("focus.ts", FindingKind::Vuln, Some(false)), // dropped
-            mk_vf("focus.ts", FindingKind::Vuln, Some(true)),  // kept
+            mk_vf(FindingKind::Vuln, Some(false)),
+            mk_vf(FindingKind::Vuln, Some(true)),
         ];
-        let out =
-            propose_many(verified, root, provider, "oneshot", 2).await;
-        assert_eq!(out.len(), 1);
-        assert!(out[0].diff.is_some());
-    }
-
-    #[tokio::test]
-    async fn propose_many_patches_hardening() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        std::fs::write(root.join("focus.ts"), "a\nb\nc\n").unwrap();
-
-        let provider: Arc<dyn Provider> = Arc::new(OneShotProvider::new(
-            r#"{"file":"focus.ts","anchor_line":2,"old_block":"b\n","new_block":"B\n","explanation":"x"}"#,
-        ));
-        let verified = vec![mk_vf("focus.ts", FindingKind::Hardening, None)];
         let out = propose_many(verified, root, provider, "oneshot", 2).await;
         assert_eq!(out.len(), 1);
+        assert!(out[0].diff.is_some());
     }
 }

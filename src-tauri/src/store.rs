@@ -2,16 +2,9 @@
 //! `<app_data_dir>/open-sec.db`. Schema is migrated forward via PRAGMA
 //! user_version so future shape changes don't require manual DB resets.
 //!
-//! Stage 9a scope: persist completed scans and their findings, list past
-//! scan groups by root for the launcher, and load any past scan back into
-//! the workspace without re-running. Triage actions (9b) and cancellation
-//! (9c) extend this schema; the `triage` table is created up front so the
-//! migration doesn't have to grow.
-//!
-//! For the complex per-finding payloads (`Verdict`, `Patch`) we store
-//! serialized JSON in columns rather than fully normalised tables — we
-//! always read them together with their finding, and there's no querying
-//! into their internals.
+//! Complex per-finding payloads (`Verdict`, `Patch`) are stored as serialized
+//! JSON in columns rather than fully normalised tables — we always read them
+//! together with their finding, and there's no querying into their internals.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -22,14 +15,12 @@ use serde::{Deserialize, Serialize};
 use serde_json as json;
 use sha2::{Digest, Sha256};
 
-use crate::scanner::ingest::{Skipped, WalkResult};
+use crate::scanner::ingest::WalkResult;
 use crate::scanner::orchestrate::{DetectError, FileFindings, ScanResult, ScanStatus, StageDurations, StageUsage};
 use crate::scanner::patch::Patch;
 use crate::scanner::triage::TriagedFile;
 use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::Finding;
-
-const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS scans (
@@ -97,6 +88,13 @@ const SCHEMA_V4: &str = r#"
 ALTER TABLE scans ADD COLUMN durations_json TEXT NOT NULL DEFAULT '{}';
 "#;
 
+// Drop columns + index that were written but never read.
+const SCHEMA_V5: &str = r#"
+DROP INDEX IF EXISTS findings_finding_id_idx;
+ALTER TABLE scans DROP COLUMN finished_at;
+ALTER TABLE scans DROP COLUMN hardening_findings;
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TriageStatus {
@@ -145,11 +143,7 @@ pub struct ScanGroup {
     pub root: String,
     pub latest_scan_id: String,
     pub latest_started_at: i64,
-    pub latest_finished_at: Option<i64>,
-    pub latest_status: String,
     pub latest_kept: i64,
-    pub latest_total: i64,
-    pub scan_count: i64,
 }
 
 pub struct Store {
@@ -221,8 +215,12 @@ impl Store {
             tx.pragma_update(None, "user_version", 4)?;
             tx.commit()?;
         }
-        // Future migrations chain here: if current < 5 { ... }
-        let _ = CURRENT_SCHEMA_VERSION; // keep compiler honest about the constant being used
+        if current < 5 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(SCHEMA_V5)?;
+            tx.pragma_update(None, "user_version", 5)?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -230,7 +228,6 @@ impl Store {
     pub fn save_scan(&self, result: &ScanResult, status: &str) -> Result<String> {
         let scan_id = new_scan_id();
         let started_at = now_ms();
-        let finished_at = started_at;
 
         let mut conn = self.db();
         let tx = conn.transaction()?;
@@ -246,26 +243,19 @@ impl Store {
             .iter()
             .filter(|v| v.verdict.as_ref().map(|x| x.keep()).unwrap_or(false))
             .count() as i64;
-        let hardening = result
-            .verified
-            .iter()
-            .filter(|v| matches!(v.finding.kind, crate::scanner::FindingKind::Hardening))
-            .count() as i64;
 
         tx.execute(
-            "INSERT INTO scans (id, root, started_at, finished_at, status,
-                 total_findings, kept_findings, hardening_findings,
+            "INSERT INTO scans (id, root, started_at, status,
+                 total_findings, kept_findings,
                  walk_json, triaged_json, usage_json, detect_errors_json, durations_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 scan_id,
                 result.root.to_string_lossy(),
                 started_at,
-                finished_at,
                 status,
                 total,
                 kept,
-                hardening,
                 walk_json,
                 triaged_json,
                 usage_json,
@@ -339,10 +329,7 @@ impl Store {
     pub fn list_scan_groups(&self, limit: usize) -> Result<Vec<ScanGroup>> {
         let conn = self.db();
         let mut stmt = conn.prepare(
-            "SELECT s.root,
-                    s.id, s.started_at, s.finished_at, s.status,
-                    s.kept_findings, s.total_findings,
-                    (SELECT COUNT(*) FROM scans s2 WHERE s2.root = s.root) AS scan_count
+            "SELECT s.root, s.id, s.started_at, s.kept_findings
              FROM scans s
              WHERE s.started_at = (SELECT MAX(started_at) FROM scans s3 WHERE s3.root = s.root)
              ORDER BY s.started_at DESC
@@ -354,11 +341,7 @@ impl Store {
                     root: row.get(0)?,
                     latest_scan_id: row.get(1)?,
                     latest_started_at: row.get(2)?,
-                    latest_finished_at: row.get(3)?,
-                    latest_status: row.get(4)?,
-                    latest_kept: row.get(5)?,
-                    latest_total: row.get(6)?,
-                    scan_count: row.get(7)?,
+                    latest_kept: row.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -500,8 +483,7 @@ impl Store {
     }
 
     /// Return the scan_id of the most-recent scan for `root`, or `None`.
-    /// Backs the `get_latest_scan_for` IPC so the report window doesn't have
-    /// to page through every group.
+    /// Used by the export commands to find which scan to render.
     pub fn latest_scan_id_for_root(&self, root: &str) -> Result<Option<String>> {
         let conn = self.db();
         let id: Option<String> = conn
@@ -512,12 +494,6 @@ impl Store {
             )
             .optional()?;
         Ok(id)
-    }
-
-    pub fn delete_scan(&self, scan_id: &str) -> Result<()> {
-        let conn = self.db();
-        conn.execute("DELETE FROM scans WHERE id = ?1", params![scan_id])?;
-        Ok(())
     }
 
     pub fn delete_scans_for_root(&self, root: &str) -> Result<()> {
@@ -724,10 +700,6 @@ fn severity_from_str(s: &str) -> Result<crate::scanner::Severity> {
     })
 }
 
-// Silence: `Skipped` is referenced indirectly via WalkResult JSON round-trip.
-#[allow(dead_code)]
-fn _ensure_skipped_used(_: &Skipped) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,7 +776,6 @@ mod tests {
         let groups = store.list_scan_groups(20).unwrap();
         assert_eq!(groups.len(), 1, "same root must collapse to one group");
         assert_eq!(groups[0].latest_scan_id, id2);
-        assert_eq!(groups[0].scan_count, 2);
     }
 
     #[test]
@@ -813,14 +784,6 @@ mod tests {
         // Second migrate call should be a no-op.
         store.migrate().unwrap();
         store.migrate().unwrap();
-    }
-
-    #[test]
-    fn delete_scan_cascades() {
-        let store = Store::open_in_memory().unwrap();
-        let id = store.save_scan(&mk_result(), "completed").unwrap();
-        store.delete_scan(&id).unwrap();
-        assert!(store.load_scan(&id).is_err());
     }
 
     #[test]

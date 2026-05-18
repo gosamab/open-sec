@@ -21,7 +21,6 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.11.1", features = [] }
 tokio = { version = "1.52.3", features = ["full", "tracing"] }
-futures = "0.3.32"
 async-trait = "0.1.89"
 anyhow = "1.0.102"
 thiserror = "2.0.18"
@@ -33,14 +32,17 @@ keyring = "3.6.3"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
 tauri-plugin-dialog = "2.7.1"
-bytes = "1.11.1"
 tree-sitter = "0.26.8"
 tree-sitter-rust = "0.24.2"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-python = "0.25.0"
+tree-sitter-dart = "0.2.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-c-sharp = "0.23.5"
 regex = "1.12.3"
 
 [dev-dependencies]

@@ -43,19 +43,6 @@ export function severityDot(s: Severity): string {
 	}
 }
 
-export function priorityClass(p: Priority): string {
-	switch (p) {
-		case 'high':
-			return 'bg-orange-500/15 text-orange-600 dark:text-orange-300';
-		case 'normal':
-			return 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-300';
-		case 'low':
-			return 'bg-blue-500/15 text-blue-600 dark:text-blue-300';
-		case 'skip':
-			return 'bg-zinc-300/30 text-zinc-500 italic';
-	}
-}
-
 export function priorityChipClass(p: Priority | null): string {
 	switch (p) {
 		case 'high':
@@ -94,8 +81,6 @@ export function skipReasonLabel(r: SkipReason): string {
 			return 'minified';
 		case 'io_error':
 			return 'io error';
-		case 'unsupported_ext':
-			return 'unsupported ext';
 	}
 }
 
@@ -183,11 +168,6 @@ export function statusDotClass(s: FindingStatus): string {
 	}
 }
 
-export function statusLabel(s: FindingStatus): string {
-	if (s === 'verifying') return 'verifying…';
-	return s;
-}
-
 /** Label-with-detail for cases that need extra info (e.g. snooze remaining). */
 export function statusLabelFor(f: Finding, s: FindingStatusInputs): string {
 	const st = findingStatus(f, s);
@@ -198,7 +178,8 @@ export function statusLabelFor(f: Finding, s: FindingStatusInputs): string {
 			return `snoozed · ${days}d`;
 		}
 	}
-	return statusLabel(st);
+	if (st === 'verifying') return 'verifying…';
+	return st;
 }
 
 /** Compact "12.4k" / "3.2M" style for token counts. Returns the raw number
@@ -259,18 +240,6 @@ export const DEFAULT_FINDINGS_FILTER: FindingsFilter = {
 	statuses: new Set(),
 	kind: 'all'
 };
-
-/** True iff `f` is anything other than the default. Used to show an "active"
- *  badge on the filter button when the user has narrowed things down. */
-export function isNonDefaultFilter(f: FindingsFilter): boolean {
-	return (
-		f.sortKey !== DEFAULT_FINDINGS_FILTER.sortKey ||
-		f.sortDir !== DEFAULT_FINDINGS_FILTER.sortDir ||
-		f.severities.size > 0 ||
-		f.statuses.size > 0 ||
-		f.kind !== 'all'
-	);
-}
 
 /** Count of "narrowing" axes a user has applied — to badge the filter button.
  *  Sort changes don't count as filtering. */

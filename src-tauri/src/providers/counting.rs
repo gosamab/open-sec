@@ -1,18 +1,16 @@
-//! `Provider` decorators: token counting, cancellation, and rate-limit retry.
-//!
-//! Despite the filename this module hosts every decorator we layer on top of
-//! the inner Anthropic client. Each has the same shape: wrap `Arc<dyn Provider>`
-//! and forward `generate` / `stream` with a small slice of extra behaviour.
+//! `Provider` decorators layered on top of the inner Anthropic client:
+//! token counting, cancellation, and rate-limit retry. Each wraps an
+//! `Arc<dyn Provider>` and forwards `generate` with a small slice of
+//! extra behaviour.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use tracing::{info, warn};
 
-use super::{GenerationRequest, Provider, Response, StreamEvent, Usage};
+use super::{GenerationRequest, Provider, Response, Usage};
 use crate::error::{ProviderError, ProviderResult};
 
 /// Atomic-ish usage accumulator. The single `Mutex` is fine — generate
@@ -61,8 +59,7 @@ pub fn diff(a: &Usage, b: &Usage) -> Usage {
 }
 
 /// Wraps an inner provider and adds the response's `Usage` to a shared
-/// counter on every `generate()`. Streaming calls are forwarded verbatim
-/// (no usage tracking on streams — we don't stream in the scan pipeline).
+/// counter on every `generate()`.
 pub struct CountingProvider {
     inner: Arc<dyn Provider>,
     counter: Arc<UsageCounter>,
@@ -85,21 +82,14 @@ impl Provider for CountingProvider {
         self.counter.add(&resp.usage);
         Ok(resp)
     }
-
-    async fn stream(
-        &self,
-        req: GenerationRequest,
-    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-        self.inner.stream(req).await
-    }
 }
 
-/// Wraps an inner provider and short-circuits every `generate()` /
-/// `stream()` call with `ProviderError::Cancelled` once the shared flag
-/// flips to true. Already-running HTTP requests aren't aborted — but every
-/// agent loop checks `provider.generate()` before each iteration, so cancel
-/// takes effect at the next round-trip without needing to thread a
-/// cancellation token through every `*_many` signature.
+/// Wraps an inner provider and short-circuits every `generate()` call with
+/// `ProviderError::Cancelled` once the shared flag flips to true.
+/// Already-running HTTP requests aren't aborted — but every agent loop
+/// checks `provider.generate()` before each iteration, so cancel takes
+/// effect at the next round-trip without needing to thread a cancellation
+/// token through every `*_many` signature.
 pub struct CancellingProvider {
     inner: Arc<dyn Provider>,
     cancel: Arc<AtomicBool>,
@@ -123,16 +113,6 @@ impl Provider for CancellingProvider {
         }
         self.inner.generate(req).await
     }
-
-    async fn stream(
-        &self,
-        req: GenerationRequest,
-    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(crate::error::ProviderError::Cancelled);
-        }
-        self.inner.stream(req).await
-    }
 }
 
 /// Notification fired when the retry wrapper is about to sleep, so the
@@ -145,9 +125,6 @@ pub type RetryNotify = Arc<dyn Fn(Duration, u32) + Send + Sync>;
 /// up to `max_attempts` times. Cancellation is honored both at the call
 /// boundary and during the sleep itself (we poll every 250ms instead of
 /// `tokio::time::sleep` so a cancel-flip wakes us up promptly).
-///
-/// Only the initial connection error is retried for `stream()` — once a
-/// stream is mid-flight there's no resume point on Anthropic's side.
 pub struct RetryingProvider {
     inner: Arc<dyn Provider>,
     cancel: Option<Arc<AtomicBool>>,
@@ -225,38 +202,6 @@ impl Provider for RetryingProvider {
                         attempt = attempt + 1,
                         sleep_secs = sleep.as_secs(),
                         "rate-limited; sleeping and retrying"
-                    );
-                    if let Some(notify) = &self.notify {
-                        notify(sleep, attempt + 1);
-                    }
-                    self.sleep_or_cancel(sleep).await?;
-                    continue;
-                }
-                other => return other,
-            }
-        }
-        // Loop above always either returns or continues; this is unreachable
-        // unless max_attempts == 0 (which we don't allow), but the borrow
-        // checker doesn't know that.
-        Err(ProviderError::RateLimited { retry_after: None })
-    }
-
-    async fn stream(
-        &self,
-        req: GenerationRequest,
-    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-        for attempt in 0..self.max_attempts {
-            match self.inner.stream(req.clone()).await {
-                Err(ProviderError::RateLimited { retry_after }) => {
-                    if attempt + 1 >= self.max_attempts {
-                        warn!(attempt = attempt + 1, "stream rate-limited and out of retries");
-                        return Err(ProviderError::RateLimited { retry_after });
-                    }
-                    let sleep = self.sleep_for(retry_after);
-                    info!(
-                        attempt = attempt + 1,
-                        sleep_secs = sleep.as_secs(),
-                        "stream rate-limited; sleeping and retrying"
                     );
                     if let Some(notify) = &self.notify {
                         notify(sleep, attempt + 1);

@@ -229,9 +229,8 @@ fn with_line_numbers(source: &str) -> String {
 mod agent_tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Provider, Response, StreamEvent, Usage};
+    use crate::providers::{Provider, Response, Usage};
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
     use serde_json::json;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -264,12 +263,6 @@ mod agent_tests {
                 panic!("ScriptedProvider out of responses");
             }
             Ok(r.remove(0))
-        }
-        async fn stream(
-            &self,
-            _req: GenerationRequest,
-        ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-            unimplemented!("not used in agent tests");
         }
     }
 

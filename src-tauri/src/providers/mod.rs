@@ -1,10 +1,7 @@
-#![allow(dead_code)] // wired up incrementally as Step 3+ land
-
 pub mod anthropic;
 pub mod counting;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -120,10 +117,6 @@ pub struct GenerationRequest {
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop_sequences: Vec<String>,
 }
 
 impl GenerationRequest {
@@ -135,8 +128,6 @@ impl GenerationRequest {
             system: Vec::new(),
             tools: Vec::new(),
             temperature: None,
-            top_p: None,
-            stop_sequences: Vec::new(),
         }
     }
 }
@@ -148,8 +139,6 @@ pub enum StopReason {
     MaxTokens,
     StopSequence,
     ToolUse,
-    PauseTurn,
-    Refusal,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -174,47 +163,11 @@ pub struct Response {
     pub usage: Usage,
 }
 
-/// Streaming events emitted by `Provider::stream`.
-///
-/// Mirrors Anthropic's SSE event shape. The detection agent only needs to react
-/// to the high-level lifecycle (start/text/tool-input/stop) and the final usage
-/// delta, so we expose those without forcing callers to handle every raw frame.
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// First event of the stream; carries the assistant message id/model/initial usage.
-    MessageStart { id: String, model: String, usage: Usage },
-    /// A new content block began at `index`. The block's full shape is known once
-    /// `ContentBlockStop` arrives; for `tool_use`, intermediate `input_json` deltas
-    /// stream the JSON payload piecewise.
-    ContentBlockStart { index: u32, block: ContentBlock },
-    /// Incremental text appended to the text block at `index`.
-    TextDelta { index: u32, text: String },
-    /// Incremental JSON fragment appended to a tool_use block at `index`.
-    InputJsonDelta { index: u32, partial_json: String },
-    /// Content block at `index` finished.
-    ContentBlockStop { index: u32 },
-    /// Final message-level delta: stop reason + usage update.
-    MessageDelta {
-        stop_reason: Option<StopReason>,
-        stop_sequence: Option<String>,
-        usage: Usage,
-    },
-    /// Stream terminator.
-    MessageStop,
-}
-
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Stable name used in logs / config (e.g. "anthropic", "llama-cpp").
+    /// Stable name used in logs / config (e.g. "anthropic").
     fn name(&self) -> &'static str;
 
     /// Run a non-streaming generation. Returns the full assistant message.
     async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response>;
-
-    /// Run a streaming generation. Each yielded item is one parsed `StreamEvent`
-    /// or a `ProviderError` if the stream broke partway through.
-    async fn stream(
-        &self,
-        req: GenerationRequest,
-    ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>>;
 }

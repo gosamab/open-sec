@@ -4,13 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type FindingKind = 'vuln' | 'hardening';
 export type Priority = 'high' | 'normal' | 'low' | 'skip';
-export type SkipReason =
-	| 'excluded_dir'
-	| 'unsupported_ext'
-	| 'too_large'
-	| 'binary'
-	| 'minified'
-	| 'io_error';
+export type SkipReason = 'excluded_dir' | 'too_large' | 'binary' | 'minified' | 'io_error';
 export type ExploitKind = 'http' | 'args' | 'file' | 'other';
 
 export interface Finding {
@@ -196,10 +190,6 @@ export type ScanEvent =
 	| { kind: 'durations_update'; durations: StageDurations }
 	| { kind: 'rate_limited'; attempt: number; retry_after_secs: number };
 
-export async function greet(name: string): Promise<string> {
-	return invoke<string>('greet', { name });
-}
-
 export async function hasAnthropicKey(): Promise<boolean> {
 	return invoke<boolean>('has_anthropic_key');
 }
@@ -330,11 +320,7 @@ export interface ScanGroup {
 	root: string;
 	latest_scan_id: string;
 	latest_started_at: number; // ms since epoch
-	latest_finished_at: number | null;
-	latest_status: string;
 	latest_kept: number;
-	latest_total: number;
-	scan_count: number;
 }
 
 export async function listScanGroups(limit?: number): Promise<ScanGroup[]> {
@@ -345,18 +331,8 @@ export async function loadScan(scanId: string): Promise<ScanResult> {
 	return invoke<ScanResult>('load_scan', { scanId });
 }
 
-export async function deleteScan(scanId: string): Promise<void> {
-	return invoke<void>('delete_scan', { scanId });
-}
-
 export async function deleteScansForRoot(root: string): Promise<void> {
 	return invoke<void>('delete_scans_for_root', { root });
-}
-
-/** Convenience: load the latest persisted scan for `root`. Backed by a
- *  dedicated IPC so it doesn't depend on `listScanGroups`'s page size. */
-export async function getLatestScanFor(root: string): Promise<ScanResult> {
-	return invoke<ScanResult>('get_latest_scan_for', { root });
 }
 
 // ---------- triage -------------------------------------------------------
@@ -393,4 +369,9 @@ export async function clearTriage(findingId: string, root: string): Promise<void
 
 export async function getTriageForRoot(root: string): Promise<TriageRecord[]> {
 	return invoke<TriageRecord[]>('get_triage_for_root', { root });
+}
+
+/** Open a URL in the OS default browser. Backend whitelists http/https/mailto. */
+export async function openUrl(url: string): Promise<void> {
+	return invoke<void>('open_url', { url });
 }

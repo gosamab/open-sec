@@ -38,8 +38,8 @@ const EXCLUDED_DIRS: &[&str] = &[
 /// Extensions whose files we triage. Lowercase, no leading dot.
 const ALLOWED_EXTS: &[&str] = &[
     "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rb", "php", "java", "kt", "swift",
-    "cs", "c", "cc", "cpp", "h", "hpp", "m", "mm", "svelte", "vue", "yml", "yaml", "tf", "hcl",
-    "sh",
+    "cs", "c", "cc", "cpp", "h", "hpp", "m", "mm", "dart", "svelte", "vue", "html", "htm", "yml",
+    "yaml", "tf", "hcl", "sh",
 ];
 
 /// Exact filenames (case-sensitive) accepted even without a recognized
@@ -61,8 +61,6 @@ pub struct Candidate {
 pub enum SkipReason {
     /// Path matched an excluded vendor/build directory.
     ExcludedDir,
-    /// Extension not in the allowlist and name not in the exact-name list.
-    UnsupportedExt,
     /// File larger than `MAX_FILE_BYTES`.
     TooLarge,
     /// Null byte detected in the first `SAMPLE_BYTES`.

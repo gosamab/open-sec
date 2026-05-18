@@ -61,7 +61,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::greet,
             commands::has_anthropic_key,
             commands::set_anthropic_key,
             commands::scan_file,
@@ -76,8 +75,6 @@ pub fn run() {
             commands::save_text_file,
             commands::list_scan_groups,
             commands::load_scan,
-            commands::get_latest_scan_for,
-            commands::delete_scan,
             commands::delete_scans_for_root,
             commands::set_triage,
             commands::clear_triage,

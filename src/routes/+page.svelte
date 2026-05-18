@@ -2,7 +2,7 @@
 	import { onDestroy, onMount } from 'svelte';
 
 	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
+	import ApiKeyPrompt from '$lib/components/ApiKeyPrompt.svelte';
 	import FileTree from '$lib/components/FileTree.svelte';
 	import FindingDetail from '$lib/components/FindingDetail.svelte';
 	import FileStatusDetail from '$lib/components/FileStatusDetail.svelte';
@@ -31,7 +31,6 @@
 		loadScan,
 		runPipeline,
 		scanFile,
-		setAnthropicKey,
 		setTriage,
 		type Excerpt,
 		type Finding,
@@ -71,8 +70,6 @@
 
 	// ---------- state ----------------------------------------------------
 	let keyConfigured = $state(false);
-	let keyInput = $state('');
-	let savingKey = $state(false);
 
 	let root = $state('');
 	let scanning = $state(false);
@@ -549,18 +546,8 @@
 		}
 	}
 
-	async function saveKey() {
-		if (!keyInput.trim()) return;
-		savingKey = true;
-		try {
-			await setAnthropicKey(keyInput.trim());
-			keyConfigured = await hasAnthropicKey();
-			keyInput = '';
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			savingKey = false;
-		}
+	async function refreshKeyState() {
+		keyConfigured = await hasAnthropicKey();
 	}
 
 	// ---------- derived --------------------------------------------------
@@ -903,21 +890,7 @@
 		/>
 
 		{#if !keyConfigured}
-			<div class="border-border bg-amber-50/40 dark:bg-amber-950/20 border-b px-4 py-3">
-				<div class="flex items-center gap-2">
-					<span class="text-sm font-medium">Anthropic API key required</span>
-					<Input
-						type="password"
-						bind:value={keyInput}
-						placeholder="sk-ant-…"
-						autocomplete="off"
-						class="h-8 max-w-md text-xs"
-					/>
-					<Button size="sm" onclick={saveKey} disabled={savingKey || !keyInput.trim()}>
-						{savingKey ? 'Saving…' : 'Save to keychain'}
-					</Button>
-				</div>
-			</div>
+			<ApiKeyPrompt variant="strip" onSaved={refreshKeyState} />
 		{/if}
 
 		{#if humanizedError}

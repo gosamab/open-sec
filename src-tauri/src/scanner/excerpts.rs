@@ -44,6 +44,10 @@ enum Lang {
     Typescript,
     Tsx,
     Python,
+    Dart,
+    Java,
+    CSharp,
+    Html,
 }
 
 fn language_for(path: &Path) -> Option<Lang> {
@@ -54,6 +58,10 @@ fn language_for(path: &Path) -> Option<Lang> {
         "tsx" => Lang::Tsx,
         "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
         "py" => Lang::Python,
+        "dart" => Lang::Dart,
+        "java" => Lang::Java,
+        "cs" => Lang::CSharp,
+        "html" | "htm" => Lang::Html,
         _ => return None,
     })
 }
@@ -65,6 +73,10 @@ fn tree_sitter_language(lang: Lang) -> Language {
         Lang::Typescript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         Lang::Python => tree_sitter_python::LANGUAGE.into(),
+        Lang::Dart => tree_sitter_dart::LANGUAGE.into(),
+        Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Html => tree_sitter_html::LANGUAGE.into(),
     }
 }
 
@@ -97,6 +109,48 @@ fn is_enclosing(lang: Lang, kind: &str) -> bool {
                 | "class_expression"
         ),
         Lang::Python => matches!(kind, "function_definition" | "class_definition"),
+        Lang::Dart => matches!(
+            kind,
+            "function_signature"
+                | "function_body"
+                | "method_signature"
+                | "getter_signature"
+                | "setter_signature"
+                | "constructor_signature"
+                | "class_definition"
+                | "mixin_declaration"
+                | "extension_declaration"
+                | "function_expression"
+        ),
+        Lang::Java => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "annotation_type_declaration"
+                | "record_declaration"
+                | "lambda_expression"
+        ),
+        Lang::CSharp => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "destructor_declaration"
+                | "local_function_statement"
+                | "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "record_declaration"
+                | "enum_declaration"
+                | "delegate_declaration"
+                | "namespace_declaration"
+                | "lambda_expression"
+        ),
+        // HTML doesn't really have "functions" — only walk up to <script> /
+        // <style> blocks; anything else falls back to the line window.
+        Lang::Html => matches!(kind, "script_element" | "style_element"),
     }
 }
 
@@ -122,11 +176,13 @@ fn shiki_lang(path: &Path) -> Option<String> {
             "c" | "h" => "c",
             "cc" | "cpp" | "cxx" | "hpp" => "cpp",
             "m" | "mm" => "objective-c",
+            "dart" => "dart",
             "yml" | "yaml" => "yaml",
             "tf" | "hcl" => "hcl",
             "sh" => "bash",
             "svelte" => "svelte",
             "vue" => "vue",
+            "html" | "htm" => "html",
             _ => return None,
         }
         .to_string(),

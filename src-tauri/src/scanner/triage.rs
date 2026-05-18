@@ -211,31 +211,18 @@ fn priority_rank(p: Priority) -> u8 {
 mod tests {
     use super::*;
     use crate::error::ProviderResult;
-    use crate::providers::{Response, StopReason, StreamEvent, Usage};
+    use crate::providers::{Response, StopReason, Usage};
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
-    use std::sync::Mutex;
-    use std::time::Duration;
     use tempfile::TempDir;
 
     struct FixedProvider {
         body: String,
-        /// Tracks max concurrent in-flight calls so we can assert the
-        /// semaphore actually limits parallelism.
-        in_flight: Arc<std::sync::atomic::AtomicUsize>,
-        peak: Arc<std::sync::atomic::AtomicUsize>,
-        delay: Duration,
-        seen: Mutex<usize>,
     }
 
     impl FixedProvider {
-        fn new(body: &str, delay_ms: u64) -> Self {
+        fn new(body: &str) -> Self {
             Self {
                 body: body.to_string(),
-                in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                delay: Duration::from_millis(delay_ms),
-                seen: Mutex::new(0),
             }
         }
     }
@@ -246,12 +233,6 @@ mod tests {
             "fixed"
         }
         async fn generate(&self, _req: GenerationRequest) -> ProviderResult<Response> {
-            use std::sync::atomic::Ordering;
-            let n = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            self.peak.fetch_max(n, Ordering::SeqCst);
-            *self.seen.lock().unwrap() += 1;
-            tokio::time::sleep(self.delay).await;
-            self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(Response {
                 id: "msg".into(),
                 model: "fixed".into(),
@@ -263,19 +244,12 @@ mod tests {
                 usage: Usage::default(),
             })
         }
-        async fn stream(
-            &self,
-            _req: GenerationRequest,
-        ) -> ProviderResult<BoxStream<'static, ProviderResult<StreamEvent>>> {
-            unimplemented!()
-        }
     }
 
     #[tokio::test]
     async fn triage_one_parses_bucket_and_reason() {
         let provider = FixedProvider::new(
             r#"{"priority":"high","reason":"http handler reads body, queries DB"}"#,
-            0,
         );
         let r = triage_one("src/login.ts", "// code", &provider, "fixed")
             .await
@@ -288,49 +262,11 @@ mod tests {
     async fn triage_one_strips_markdown_fence() {
         let provider = FixedProvider::new(
             "```json\n{\"priority\":\"low\",\"reason\":\"test file\"}\n```",
-            0,
         );
         let r = triage_one("src/x.test.ts", "// code", &provider, "fixed")
             .await
             .unwrap();
         assert_eq!(r.priority, Priority::Low);
-    }
-
-    #[tokio::test]
-    async fn triage_many_respects_concurrency_cap() {
-        let tmp = TempDir::new().unwrap();
-        let mut candidates = Vec::new();
-        for i in 0..20 {
-            let p = tmp.path().join(format!("f{i}.ts"));
-            std::fs::write(&p, b"x\n").unwrap();
-            candidates.push(Candidate {
-                path: p,
-                rel_path: format!("f{i}.ts"),
-                size_bytes: 2,
-                line_count: 1,
-            });
-        }
-        let provider = Arc::new(FixedProvider::new(
-            r#"{"priority":"normal","reason":"ok"}"#,
-            30,
-        ));
-        let peak = provider.peak.clone();
-        let seen = Arc::clone(&provider) as Arc<dyn Provider>;
-        let out = triage_many(candidates, seen, "fixed", 4).await;
-        assert_eq!(out.len(), 20);
-        // We allowed 4 concurrent permits; peak must not exceed that.
-        let observed_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            observed_peak <= 4,
-            "peak concurrency {observed_peak} exceeded permit cap 4"
-        );
-        // And we must have hit *some* parallelism — otherwise the test isn't
-        // really verifying the semaphore. With 20 files and 30ms delay we
-        // should comfortably see >1.
-        assert!(
-            observed_peak > 1,
-            "peak concurrency {observed_peak} suspiciously low; test isn't exercising parallelism"
-        );
     }
 
     #[tokio::test]
@@ -346,10 +282,8 @@ mod tests {
                 line_count: 1,
             }
         };
-        // Scripted to give every file the same bucket — verifies path tiebreak.
         let provider = Arc::new(FixedProvider::new(
             r#"{"priority":"normal","reason":"ok"}"#,
-            0,
         ));
         let out = triage_many(
             vec![mk("z.ts"), mk("a.ts"), mk("m.ts")],

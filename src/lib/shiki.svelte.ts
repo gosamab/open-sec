@@ -1,13 +1,16 @@
 /**
- * Shiki integration. We initialise a single highlighter lazily, starting
- * with `diff` for the patch viewer, then load additional languages on
- * demand the first time an excerpt asks for one. Both light and dark
- * themes load up front so we can flip via the `.dark` class on `<html>`
- * without re-highlighting.
+ * Shiki integration. The `shiki` package is dynamically imported the first
+ * time a highlight is requested — Vite splits it into its own lazy chunk so
+ * cold-start doesn't pay for the grammar/theme JSON. We initialise a single
+ * highlighter starting with `diff` for the patch viewer, then load
+ * additional languages on demand. Both light and dark themes load up front
+ * so we can flip via the `.dark` class on `<html>` without re-highlighting.
  */
 
-import { createHighlighter, type Highlighter } from 'shiki';
 import DOMPurify from 'isomorphic-dompurify';
+// Type-only import — erased at compile time, doesn't pull `shiki` into the
+// importing chunk. The runtime import lives in `getHighlighter()` below.
+import type { Highlighter } from 'shiki';
 
 const LIGHT_THEME = 'github-light';
 const DARK_THEME = 'github-dark';
@@ -18,10 +21,12 @@ const langLoadInflight = new Map<string, Promise<void>>();
 
 function getHighlighter(): Promise<Highlighter> {
 	if (!highlighterPromise) {
-		highlighterPromise = createHighlighter({
-			themes: [LIGHT_THEME, DARK_THEME],
-			langs: ['diff']
-		});
+		highlighterPromise = import('shiki').then((shiki) =>
+			shiki.createHighlighter({
+				themes: [LIGHT_THEME, DARK_THEME],
+				langs: ['diff']
+			})
+		);
 	}
 	return highlighterPromise;
 }

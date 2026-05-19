@@ -197,6 +197,27 @@
 			</p>
 		</section>
 
+		<!-- Currency -->
+		<section class="space-y-3">
+			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
+				Currency
+			</h3>
+			<div class="grid grid-cols-[160px_1fr] items-center gap-3 text-sm">
+				<label for="c-sar" class="text-muted-foreground">SAR per USD</label>
+				<div class="flex items-center gap-2">
+					<Input
+						id="c-sar"
+						type="number"
+						min="0"
+						step="0.01"
+						bind:value={draft.sar_per_usd}
+						class="h-8 text-xs"
+					/>
+					<span class="text-xs text-muted-foreground">default 3.75 (SAMA peg)</span>
+				</div>
+			</div>
+		</section>
+
 		<footer class="flex items-center justify-between border-t border-border pt-4">
 			<Button variant="outline" size="sm" onclick={reset}>Reset to defaults</Button>
 			<div class="flex gap-2">

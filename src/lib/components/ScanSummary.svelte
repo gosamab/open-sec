@@ -12,6 +12,8 @@
 		STATUS_OPTIONS,
 		type FindingStatus
 	} from '$lib/scan-display';
+	import { costUSD, formatSAR, formatUSD, stageCostsUSD, usdToSAR } from '$lib/pricing';
+	import { settings } from '$lib/settings.svelte';
 
 	export type UsageRow = { name: string; u: StageUsage['triage']; ms: number };
 
@@ -75,6 +77,34 @@
 		{ key: 'medium', label: 'Medium' },
 		{ key: 'low', label: 'Low' }
 	];
+
+	/** Per-row → model lookup so the cost column can price each stage's
+	 *  tokens against the right Anthropic SKU. Falls back to `''` for the
+	 *  ingest row (no model, cost is always $0). */
+	function modelFor(stage: string): string {
+		switch (stage) {
+			case 'triage':
+				return settings.value.triage_model;
+			case 'detect':
+				return settings.value.detect_model;
+			case 'verify':
+				return settings.value.verify_model;
+			case 'patch':
+				return settings.value.patch_model;
+			default:
+				return '';
+		}
+	}
+
+	let stageCosts = $derived(
+		stageCostsUSD(usage, {
+			triage_model: settings.value.triage_model,
+			detect_model: settings.value.detect_model,
+			verify_model: settings.value.verify_model,
+			patch_model: settings.value.patch_model
+		})
+	);
+	let totalSAR = $derived(usdToSAR(stageCosts.total, settings.value.sar_per_usd));
 </script>
 
 <div class="p-4">
@@ -379,7 +409,11 @@
 						<span class="text-xs font-medium">Token usage</span>
 					</div>
 					<span class="font-mono text-xs text-muted-foreground">
-						{compactTokens(totalTokens)}
+						{#if stageCosts.total > 0}
+							{formatUSD(stageCosts.total)} · {formatSAR(totalSAR)}
+						{:else}
+							{compactTokens(totalTokens)}
+						{/if}
 					</span>
 				</summary>
 				<div class="border-t border-border bg-muted/10">
@@ -392,6 +426,7 @@
 								<th class="px-2 py-1.5 text-right font-medium">In</th>
 								<th class="px-2 py-1.5 text-right font-medium">Out</th>
 								<th class="px-2 py-1.5 text-right font-medium">Cache</th>
+								<th class="px-2 py-1.5 text-right font-medium">Cost</th>
 								<th class="px-3 py-1.5 text-right font-medium">Time</th>
 							</tr>
 						</thead>
@@ -402,12 +437,14 @@
 									<td class="px-2 py-1 text-right tabular-nums">—</td>
 									<td class="px-2 py-1 text-right tabular-nums">—</td>
 									<td class="px-2 py-1 text-right tabular-nums">—</td>
+									<td class="px-2 py-1 text-right tabular-nums">—</td>
 									<td class="px-3 py-1 text-right tabular-nums">
 										{formatDuration(durations.ingest_ms)}
 									</td>
 								</tr>
 							{/if}
 							{#each usageRows as row (row.name)}
+								{@const rowCost = costUSD(row.u, modelFor(row.name))}
 								<tr class="border-b border-border/30 last:border-b-0">
 									<td class="px-3 py-1">{row.name}</td>
 									<td class="px-2 py-1 text-right tabular-nums">
@@ -418,6 +455,9 @@
 									</td>
 									<td class="px-2 py-1 text-right text-muted-foreground tabular-nums">
 										{row.u.cache_read_input_tokens.toLocaleString()}
+									</td>
+									<td class="px-2 py-1 text-right tabular-nums">
+										{rowCost > 0 ? formatUSD(rowCost) : '—'}
 									</td>
 									<td class="px-3 py-1 text-right tabular-nums">
 										{row.ms > 0 ? formatDuration(row.ms) : '—'}
@@ -437,10 +477,21 @@
 								<td class="px-2 py-1.5 text-right text-muted-foreground tabular-nums">
 									{usage.total.cache_read_input_tokens.toLocaleString()}
 								</td>
+								<td class="px-2 py-1.5 text-right tabular-nums">
+									{stageCosts.total > 0 ? formatUSD(stageCosts.total) : '—'}
+								</td>
 								<td class="px-3 py-1.5 text-right tabular-nums">
 									{durations.total_ms > 0 ? formatDuration(durations.total_ms) : '—'}
 								</td>
 							</tr>
+							{#if stageCosts.total > 0}
+								<tr class="bg-muted/20 text-muted-foreground">
+									<td class="px-3 py-1 text-[0.6875rem]" colspan="5">
+										≈ {formatSAR(totalSAR)} at {settings.value.sar_per_usd.toFixed(2)} SAR/USD
+									</td>
+									<td class="px-3 py-1"></td>
+								</tr>
+							{/if}
 						</tfoot>
 					</table>
 				</div>

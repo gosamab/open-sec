@@ -1,14 +1,17 @@
 <script lang="ts">
 	import { ChevronRight, Folder, Play } from 'lucide-svelte';
 	import { Button } from '$lib/components/ui/button';
+	import EstimatePanel from '$lib/components/EstimatePanel.svelte';
 	import { PIPELINE_STAGES } from '$lib/pipeline';
+	import type { CostEstimate } from '$lib/estimate';
 
 	interface Props {
 		root: string;
 		keyConfigured: boolean;
+		costEstimate: CostEstimate | null;
 		onScan: () => void;
 	}
-	let { root, keyConfigured, onScan }: Props = $props();
+	let { root, keyConfigured, costEstimate, onScan }: Props = $props();
 </script>
 
 <div class="flex flex-1 justify-center overflow-y-auto px-8 pt-16 pb-10">
@@ -24,6 +27,15 @@
 			<Folder size={14} class="shrink-0 text-muted-foreground" />
 			<span class="truncate font-mono text-xs" title={root}>{root || '—'}</span>
 		</div>
+
+		{#if costEstimate}
+			<section class="space-y-2.5">
+				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
+					Estimate
+				</h3>
+				<EstimatePanel estimate={costEstimate} showStageBreakdown />
+			</section>
+		{/if}
 
 		<section class="space-y-2.5">
 			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
@@ -66,8 +78,10 @@
 			<p class="text-center text-xs text-muted-foreground">
 				{#if !keyConfigured}
 					Add your Anthropic API key above to enable scanning.
-				{:else}
+				{:else if !costEstimate}
 					Typically a few cents and under a minute for a small project.
+				{:else}
+					Estimate may differ from actual cost — prompt caching usually helps.
 				{/if}
 			</p>
 		</div>

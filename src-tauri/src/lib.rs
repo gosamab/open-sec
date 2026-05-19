@@ -68,6 +68,7 @@ pub fn run() {
             commands::run_pipeline,
             commands::resume_pipeline,
             commands::cancel_scan,
+            commands::estimate_scan,
             commands::get_excerpt,
             commands::apply_patch,
             commands::regenerate_patch,

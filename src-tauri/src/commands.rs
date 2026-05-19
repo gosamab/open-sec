@@ -12,7 +12,7 @@ use crate::providers::Provider;
 use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
 use crate::scanner::excerpts::{extract, Excerpt};
-use crate::scanner::ingest::WalkResult;
+use crate::scanner::ingest::{self, WalkResult};
 use crate::scanner::orchestrate::{
     run_scan, DetectError, FileFindings, ScanConfig, ScanEvent, ScanResult, ScanStatus,
     StageDurations, StageUsage,
@@ -317,6 +317,20 @@ pub async fn resume_pipeline(
 #[tauri::command]
 pub fn cancel_scan(cancel: State<'_, CancelHandle>) -> bool {
     cancel.cancel()
+}
+
+/// Walk `root` and return the candidate/skipped split without running any
+/// LLM stage. Drives the pre-scan cost estimate on the onboarding panel —
+/// the frontend sums `line_count` across candidates and prices it against
+/// the configured per-stage models.
+#[tauri::command]
+#[instrument(skip_all, fields(root = %root))]
+pub fn estimate_scan(root: String) -> Result<WalkResult, String> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    ingest::walk(&root_path).map_err(|e| format!("{e:#}"))
 }
 
 /// Code excerpt for a finding's line range. Tree-sitter languages get the

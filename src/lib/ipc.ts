@@ -243,6 +243,13 @@ export async function cancelScan(): Promise<boolean> {
 	return invoke<boolean>('cancel_scan');
 }
 
+/** Run only the filesystem walk + pre-triage skip heuristics — no LLM. The
+ *  onboarding panel calls this on project open so the user sees LoC totals
+ *  and an estimated USD/SAR cost before they commit to a scan. */
+export async function estimateScan(root: string): Promise<WalkResult> {
+	return invoke<WalkResult>('estimate_scan', { root });
+}
+
 // ---------- excerpts -----------------------------------------------------
 
 export type ExcerptSource = 'enclosing_function' | 'line_range';

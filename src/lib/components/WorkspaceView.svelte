@@ -12,6 +12,7 @@
 	import { triage } from '$lib/stores/triage-state.svelte';
 	import { ui } from '$lib/stores/ui-state.svelte';
 	import type { Excerpt, Finding, Patch, Severity, StageUsage, Verdict } from '$lib/ipc';
+	import type { CostEstimate } from '$lib/estimate';
 	import type {
 		FindingStatus,
 		FindingStatusInputs
@@ -48,6 +49,7 @@
 		severityCounts: Record<Severity, number>;
 		usageRows: { name: string; u: StageUsage['triage']; ms: number }[];
 		totalTokens: number;
+		costEstimate: CostEstimate | null;
 		snoozeDays: number;
 
 		// Callbacks (per-route; can't live in a store)
@@ -101,6 +103,7 @@
 		severityCounts,
 		usageRows,
 		totalTokens,
+		costEstimate,
 		snoozeDays,
 		onBack,
 		onScan,
@@ -176,7 +179,12 @@
 	{/if}
 
 	{#if showOnboarding}
-		<OnboardingPanel root={scan.root} keyConfigured={scan.keyConfigured} {onScan} />
+		<OnboardingPanel
+			root={scan.root}
+			keyConfigured={scan.keyConfigured}
+			{costEstimate}
+			{onScan}
+		/>
 	{:else}
 		<div
 			class="grid flex-1 grid-cols-[260px_minmax(320px,1fr)_minmax(400px,1.4fr)] overflow-hidden"

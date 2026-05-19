@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 
+	import ConfirmRescanDialog from '$lib/components/ConfirmRescanDialog.svelte';
 	import Launcher from '$lib/components/Launcher.svelte';
 	import Settings from '$lib/components/Settings.svelte';
 	import WorkspaceView from '$lib/components/WorkspaceView.svelte';
@@ -14,6 +15,7 @@
 		applyPatch,
 		cancelScan,
 		clearTriage,
+		estimateScan,
 		exportMarkdown,
 		exportSarif,
 		saveTextFile,
@@ -38,6 +40,7 @@
 		type TriageStatus,
 		type VerifiedFinding
 	} from '$lib/ipc';
+	import { estimateScanCost, type CostEstimate } from '$lib/estimate';
 	import {
 		buildFileNodes,
 		collectFolderPaths,
@@ -396,6 +399,68 @@
 		resetWorkspace();
 		scan.root = path;
 		ui.view = 'workspace';
+		// Pre-scan estimate: walk the directory (no LLM) so the onboarding
+		// panel can show LoC + cost projections before the user commits.
+		// `run_pipeline` re-runs the walk anyway, so this is throwaway work
+		// off the user-perceived critical path.
+		void refreshEstimate(path);
+	}
+
+	async function refreshEstimate(root: string) {
+		try {
+			const walk = await estimateScan(root);
+			// Bail if the user switched projects or already started scanning
+			// while the walk was in flight.
+			if (scan.root !== root || scan.scanning || scan.scanResult) return;
+			scan.walk = walk;
+		} catch (e) {
+			console.error('estimate_scan failed', e);
+		}
+	}
+
+	let costEstimate = $derived<CostEstimate | null>(
+		!scan.scanResult && !scan.scanning && scan.walk
+			? estimateScanCost(scan.walk, settings.value)
+			: null
+	);
+
+	// Rescan flow: clicking Scan when a result is already on screen pops a
+	// confirmation dialog with a fresh estimate. First-scan path (onboarding
+	// panel visible) goes straight to runScan since the estimate is already
+	// inline there.
+	let confirmingRescan = $state(false);
+	let rescanEstimate = $state<CostEstimate | null>(null);
+
+	async function requestScan() {
+		if (!scan.root || scan.scanning) return;
+		const isRescan = !!scan.scanResult || scan.loadedScanId !== null;
+		if (!isRescan) {
+			await runScan();
+			return;
+		}
+		// Pop the dialog immediately with whatever walk we already have so the
+		// user sees an instant estimate, then refresh the walk in the
+		// background and update it in place.
+		rescanEstimate = scan.walk ? estimateScanCost(scan.walk, settings.value) : null;
+		confirmingRescan = true;
+		try {
+			const walk = await estimateScan(scan.root);
+			if (!confirmingRescan) return;
+			rescanEstimate = estimateScanCost(walk, settings.value);
+		} catch (e) {
+			console.error('estimate_scan failed', e);
+		}
+	}
+
+	async function confirmRescan() {
+		confirmingRescan = false;
+		rescanEstimate = null;
+		await runScan();
+	}
+
+	function cancelRescan() {
+		confirmingRescan = false;
+		rescanEstimate = null;
 	}
 
 	async function openProjectPast(group: ScanGroup) {
@@ -874,9 +939,10 @@
 		{severityCounts}
 		{usageRows}
 		{totalTokens}
+		{costEstimate}
 		snoozeDays={SNOOZE_DAYS}
 		onBack={backToLauncher}
-		onScan={runScan}
+		onScan={requestScan}
 		onResume={resumeScan}
 		onCancel={requestCancel}
 		onOpenSettings={() => (ui.settingsOpen = true)}
@@ -905,4 +971,13 @@
 
 {#if ui.settingsOpen}
 	<Settings onClose={() => (ui.settingsOpen = false)} />
+{/if}
+
+{#if confirmingRescan}
+	<ConfirmRescanDialog
+		root={scan.root}
+		estimate={rescanEstimate}
+		onConfirm={confirmRescan}
+		onCancel={cancelRescan}
+	/>
 {/if}

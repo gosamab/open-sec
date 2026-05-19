@@ -19,6 +19,9 @@ export interface ScanSettings {
 	patch_model: string;
 	/** Combined input+output token cap across the whole scan. 0 = unlimited. */
 	budget_total_tokens: number;
+	/** Saudi riyal per USD. Default 3.75 is the SAMA peg (in place since 1986).
+	 *  Exposed in case the peg ever moves or the user wants a custom rate. */
+	sar_per_usd: number;
 }
 
 export const DEFAULT_SETTINGS: ScanSettings = {
@@ -30,7 +33,8 @@ export const DEFAULT_SETTINGS: ScanSettings = {
 	detect_model: 'claude-sonnet-4-6',
 	verify_model: 'claude-opus-4-7',
 	patch_model: 'claude-sonnet-4-6',
-	budget_total_tokens: 0
+	budget_total_tokens: 0,
+	sar_per_usd: 3.75
 };
 
 function load(): ScanSettings {
@@ -72,6 +76,12 @@ function clampInt(v: unknown, lo: number, hi: number, fallback: number): number 
 	return Math.min(Math.max(Math.trunc(n), lo), hi);
 }
 
+function clampFloat(v: unknown, lo: number, hi: number, fallback: number): number {
+	const n = typeof v === 'number' ? v : Number(v);
+	if (!Number.isFinite(n) || n <= 0) return fallback;
+	return Math.min(Math.max(n, lo), hi);
+}
+
 /** Clamp every numeric field against its bounds. Strings stay untouched. */
 function sanitize(s: ScanSettings): ScanSettings {
 	return {
@@ -100,7 +110,8 @@ function sanitize(s: ScanSettings): ScanSettings {
 			CONCURRENCY_BOUNDS.patch_concurrency.max,
 			DEFAULT_SETTINGS.patch_concurrency
 		),
-		budget_total_tokens: clampInt(s.budget_total_tokens, 0, Number.MAX_SAFE_INTEGER, 0)
+		budget_total_tokens: clampInt(s.budget_total_tokens, 0, Number.MAX_SAFE_INTEGER, 0),
+		sar_per_usd: clampFloat(s.sar_per_usd, 0.0001, 1000, DEFAULT_SETTINGS.sar_per_usd)
 	};
 }
 

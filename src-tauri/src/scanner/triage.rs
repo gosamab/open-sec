@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, instrument, warn};
 
 use crate::providers::{
-    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, SystemBlock,
+    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, SystemBlock, Tool,
 };
 use crate::scanner::ingest::Candidate;
-use crate::scanner::util::{collect_text, extract_json_object};
 
 pub const DEFAULT_TRIAGE_MODEL: &str = "claude-haiku-4-5";
 pub const DEFAULT_TRIAGE_CONCURRENCY: usize = 8;
@@ -50,10 +50,8 @@ stage focuses on code most likely to contain real vulnerabilities.
 You DO NOT identify vulnerabilities here. You only decide whether the
 detection model should look at this file, and how soon.
 
-OUTPUT FORMAT
-
-Output STRICT JSON only — no prose, no markdown fences. The object must be:
-  {"priority": "high" | "normal" | "low" | "skip", "reason": "<= 200 chars"}
+Call the `submit_triage` tool with your decision. That tool call IS your
+final answer.
 
 BUCKETS
 
@@ -99,7 +97,26 @@ RULES
 - `reason` must be a short concrete justification grounded in what you saw
   in the file, not a restatement of the bucket definition."#;
 
-/// Triage a single file. Returns the LLM's bucket decision.
+fn submit_triage_tool() -> Tool {
+    Tool {
+        name: "submit_triage".to_string(),
+        description: "Submit your triage bucket for the file.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "priority": { "type": "string", "enum": ["high", "normal", "low", "skip"] },
+                "reason":   { "type": "string", "description": "Short justification (<= 200 chars)." }
+            },
+            "required": ["priority", "reason"]
+        }),
+        // Triage is one-shot with a single tool; the cache marker lives here
+        // so the system prompt + tool block cache together.
+        cache_control: Some(CacheControl::ephemeral_1h()),
+    }
+}
+
+/// Triage a single file. One-shot: no read tools, no agent loop — the model
+/// must call `submit_triage` immediately.
 #[instrument(skip(provider, source), fields(path = %rel_path, bytes = source.len()))]
 pub async fn triage_one(
     rel_path: &str,
@@ -111,6 +128,7 @@ pub async fn triage_one(
     req.temperature = Some(0.0);
     req.system
         .push(SystemBlock::text(TRIAGE_PROMPT).with_cache(CacheControl::ephemeral_1h()));
+    req.tools = vec![submit_triage_tool()];
     req.messages.push(Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -122,16 +140,18 @@ pub async fn triage_one(
         .generate(req)
         .await
         .context("anthropic generate call failed")?;
+    debug!(blocks = resp.content.len(), "received triage response");
 
-    let text = collect_text(&resp.content);
-    debug!(chars = text.len(), "received triage response");
-    parse_result(&text)
-}
+    let input = resp
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::ToolUse { name, input, .. } if name == "submit_triage" => Some(input),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("triage response did not call submit_triage"))?;
 
-fn parse_result(text: &str) -> Result<TriageResult> {
-    let json = extract_json_object(text)
-        .ok_or_else(|| anyhow!("model response did not contain a JSON object: {text}"))?;
-    serde_json::from_str(json).with_context(|| format!("parsing triage JSON: {json}"))
+    serde_json::from_value(input.clone()).context("submit_triage input did not match schema")
 }
 
 /// Triage every candidate in parallel under a semaphore. Errors on individual
@@ -204,14 +224,12 @@ mod tests {
     use tempfile::TempDir;
 
     struct FixedProvider {
-        body: String,
+        input: serde_json::Value,
     }
 
     impl FixedProvider {
-        fn new(body: &str) -> Self {
-            Self {
-                body: body.to_string(),
-            }
+        fn new(input: serde_json::Value) -> Self {
+            Self { input }
         }
     }
 
@@ -224,10 +242,12 @@ mod tests {
             Ok(Response {
                 id: "msg".into(),
                 model: "fixed".into(),
-                content: vec![ContentBlock::Text {
-                    text: self.body.clone(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_triage".into(),
+                    name: "submit_triage".into(),
+                    input: self.input.clone(),
                 }],
-                stop_reason: Some(StopReason::EndTurn),
+                stop_reason: Some(StopReason::ToolUse),
                 stop_sequence: None,
                 usage: Usage::default(),
             })
@@ -237,24 +257,13 @@ mod tests {
     #[tokio::test]
     async fn triage_one_parses_bucket_and_reason() {
         let provider = FixedProvider::new(
-            r#"{"priority":"high","reason":"http handler reads body, queries DB"}"#,
+            json!({"priority":"high","reason":"http handler reads body, queries DB"}),
         );
         let r = triage_one("src/login.ts", "// code", &provider, "fixed")
             .await
             .unwrap();
         assert_eq!(r.priority, Priority::High);
         assert!(r.reason.contains("http handler"));
-    }
-
-    #[tokio::test]
-    async fn triage_one_strips_markdown_fence() {
-        let provider = FixedProvider::new(
-            "```json\n{\"priority\":\"low\",\"reason\":\"test file\"}\n```",
-        );
-        let r = triage_one("src/x.test.ts", "// code", &provider, "fixed")
-            .await
-            .unwrap();
-        assert_eq!(r.priority, Priority::Low);
     }
 
     #[tokio::test]
@@ -270,9 +279,7 @@ mod tests {
                 line_count: 1,
             }
         };
-        let provider = Arc::new(FixedProvider::new(
-            r#"{"priority":"normal","reason":"ok"}"#,
-        ));
+        let provider = Arc::new(FixedProvider::new(json!({"priority":"normal","reason":"ok"})));
         let out = triage_many(
             vec![mk("z.ts"), mk("a.ts"), mk("m.ts")],
             Arc::clone(&provider) as Arc<dyn Provider>,

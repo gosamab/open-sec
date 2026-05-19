@@ -19,10 +19,10 @@ pub const LIST_DIRECTORY: &str = "list_directory";
 pub const LIST_IMPORTS: &str = "list_imports";
 pub const GIT_BLAME: &str = "git_blame";
 
-/// JSON-schema tool definitions sent to the model.
-/// The LAST tool carries `cache_control` so the entire tool block is cached
-/// together with the system prompt (matches the locked 1h-ephemeral policy).
-pub fn tool_definitions() -> Vec<Tool> {
+/// JSON-schema definitions for the read-only tools the model can use during
+/// the agent loop. Callers pair these with a stage-specific submission tool
+/// via [`tool_definitions_with_terminal`].
+fn tool_definitions() -> Vec<Tool> {
     let defs = [
         (
             READ_FILE,
@@ -144,6 +144,19 @@ pub fn tool_definitions() -> Vec<Tool> {
         .collect()
 }
 
+/// Assemble the tools sent to the model: read-only tools + a stage-specific
+/// terminal tool (e.g. `submit_verdict`) carrying the 1-hour ephemeral cache
+/// marker. CLAUDE.md invariant: cache_control sits on the LAST tool only.
+pub fn tool_definitions_with_terminal(mut terminal: Tool) -> Vec<Tool> {
+    let mut tools = tool_definitions();
+    if let Some(last) = tools.last_mut() {
+        last.cache_control = None;
+    }
+    terminal.cache_control = Some(CacheControl::ephemeral_1h());
+    tools.push(terminal);
+    tools
+}
+
 pub async fn dispatch(name: &str, input: &Value, scan_root: &Path) -> Result<String> {
     match name {
         READ_FILE => fs_tools::read_file(input, scan_root).await,
@@ -161,17 +174,26 @@ pub async fn dispatch(name: &str, input: &Value, scan_root: &Path) -> Result<Str
 mod tests {
     use super::*;
 
+    /// Production code routes through `tool_definitions_with_terminal`, so the
+    /// invariant we actually care about is: cache_control sits on the terminal
+    /// (last) tool and nowhere else. CLAUDE.md references this test by name.
     #[test]
     fn cache_control_is_only_on_last_tool() {
-        let tools = tool_definitions();
+        let terminal = Tool {
+            name: "submit_test".into(),
+            description: "test submission tool".into(),
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+        };
+        let tools = tool_definitions_with_terminal(terminal);
         assert!(tools.len() > 1);
         for (i, t) in tools.iter().enumerate() {
             if i == tools.len() - 1 {
-                assert!(t.cache_control.is_some(), "last tool needs cache_control");
+                assert_eq!(t.name, "submit_test");
+                assert!(t.cache_control.is_some(), "terminal tool needs cache_control");
             } else {
                 assert!(t.cache_control.is_none(), "tool {i} should not be cached");
             }
         }
     }
-
 }

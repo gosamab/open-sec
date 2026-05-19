@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod counting;
+pub mod rate_limit;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

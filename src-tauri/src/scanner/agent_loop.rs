@@ -1,29 +1,24 @@
-//! Shared agent-loop driver for the detect/verify/patch stages. Each stage
-//! used to inline its own near-identical copy of this loop; the only real
-//! variation across the three was the temperature setting, the stage label
-//! in logs/errors, and how the final assistant text was parsed.
-//!
-//! Callers build an `AgentRequest`, hand it to `run_agent_loop`, and parse
-//! the returned final-message text however they need to.
+//! Shared agent-loop driver for detect/verify/patch. Each stage hands in a
+//! "submission tool" whose JSON-schema input is the structured final answer;
+//! Anthropic validates the input server-side, so malformed JSON is impossible
+//! by construction. Read-only tools (read_file, grep, ...) sit alongside the
+//! submission tool so the model can investigate before submitting.
 
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::providers::{
-    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, StopReason,
-    SystemBlock, Tool,
+    CacheControl, ContentBlock, GenerationRequest, Message, Provider, Role, SystemBlock, Tool,
 };
-use crate::scanner::util::collect_text;
 use crate::tools;
 
 /// Hard cap on tool-use round-trips per stage call. Beyond this we abort
 /// rather than burn unbounded tokens on a model that won't converge.
 pub(super) const MAX_TOOL_ITERATIONS: usize = 25;
 
-/// Inputs for one agentic stage call. Construct one per file/finding and
-/// pass it to [`run_agent_loop`].
 pub(super) struct AgentRequest<'a> {
     pub system_prompt: String,
     pub initial_user_msg: String,
@@ -38,10 +33,12 @@ pub(super) struct AgentRequest<'a> {
     pub stage_label: &'static str,
 }
 
-/// Run the tool-use conversation until the model returns an assistant turn
-/// with no tool calls, then return the joined text of that final turn.
-/// Errors out at [`MAX_TOOL_ITERATIONS`] or on any provider failure.
-pub(super) async fn run_agent_loop(req: AgentRequest<'_>) -> Result<String> {
+/// Run the agent loop until the model submits via `terminal_tool`. Returns
+/// that tool call's `input` (already schema-validated by Anthropic).
+///
+/// If the model ends its turn without calling the terminal tool, that's a
+/// stage failure — the prompt instructs the model to always submit.
+pub(super) async fn run_agent_loop(req: AgentRequest<'_>, terminal_tool: Tool) -> Result<Value> {
     let AgentRequest {
         system_prompt,
         initial_user_msg,
@@ -53,7 +50,8 @@ pub(super) async fn run_agent_loop(req: AgentRequest<'_>) -> Result<String> {
         stage_label,
     } = req;
 
-    let tool_defs: Vec<Tool> = tools::tool_definitions();
+    let terminal_name = terminal_tool.name.clone();
+    let tool_defs: Vec<Tool> = tools::tool_definitions_with_terminal(terminal_tool);
     let mut messages: Vec<Message> = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -85,44 +83,50 @@ pub(super) async fn run_agent_loop(req: AgentRequest<'_>) -> Result<String> {
             "agent iteration"
         );
 
-        // Always append the assistant turn first so any tool_use blocks are
-        // referenced by id in the next user turn's tool_result blocks.
         messages.push(Message {
             role: Role::Assistant,
             content: resp.content.clone(),
         });
 
-        let tool_uses: Vec<(String, String, serde_json::Value)> = resp
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
+        let mut terminal_input: Option<Value> = None;
+        let mut read_tool_uses: Vec<(String, String, Value)> = Vec::new();
+        for block in &resp.content {
+            if let ContentBlock::ToolUse { id, name, input } = block {
+                if name == &terminal_name {
+                    terminal_input = Some(input.clone());
+                } else {
+                    read_tool_uses.push((id.clone(), name.clone(), input.clone()));
                 }
-                _ => None,
-            })
-            .collect();
-
-        if tool_uses.is_empty() {
-            if !matches!(resp.stop_reason, Some(StopReason::EndTurn) | None) {
-                warn!(
-                    stage = stage_label,
-                    stop_reason = ?resp.stop_reason,
-                    "no tool calls but non-end_turn stop reason"
-                );
             }
-            return Ok(collect_text(&resp.content));
+        }
+
+        // Terminal tool short-circuits the loop; read tools called in the same
+        // turn are intentionally not dispatched (the conversation is over).
+        if let Some(input) = terminal_input {
+            info!(stage = stage_label, iteration, "agent submitted");
+            return Ok(input);
+        }
+
+        if read_tool_uses.is_empty() {
+            warn!(
+                stage = stage_label,
+                stop_reason = ?resp.stop_reason,
+                "agent ended turn without calling the submission tool"
+            );
+            return Err(anyhow!(
+                "{stage_label} ended its turn without calling `{terminal_name}`"
+            ));
         }
 
         info!(
             stage = stage_label,
             iteration,
-            tool_calls = tool_uses.len(),
+            tool_calls = read_tool_uses.len(),
             "agent tool calls"
         );
 
-        let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-        for (id, name, input) in &tool_uses {
+        let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(read_tool_uses.len());
+        for (id, name, input) in &read_tool_uses {
             let (content, is_error) = match tools::dispatch(name, input, canonical_root).await {
                 Ok(s) => (s, false),
                 Err(e) => (format!("error: {e:#}"), true),
@@ -140,6 +144,6 @@ pub(super) async fn run_agent_loop(req: AgentRequest<'_>) -> Result<String> {
     }
 
     Err(anyhow!(
-        "{stage_label} hit the {MAX_TOOL_ITERATIONS}-iteration tool-use cap without a final answer"
+        "{stage_label} hit the {MAX_TOOL_ITERATIONS}-iteration tool-use cap without calling `{terminal_name}`"
     ))
 }

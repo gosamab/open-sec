@@ -8,16 +8,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use diffy::{create_patch, PatchFormatter};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{instrument, warn};
 
-use crate::providers::Provider;
+use crate::providers::{Provider, Tool};
 use crate::scanner::agent_loop::{run_agent_loop, AgentRequest};
-use crate::scanner::util::{extract_json_object, resolve_focus_path, with_line_numbers};
+use crate::scanner::util::{resolve_focus_path, with_line_numbers};
 use crate::scanner::verify::VerifiedFinding;
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
@@ -78,17 +79,7 @@ Given a CONFIRMED finding (already verified to be a real issue or a
 hardening item we've decided to ship), produce the smallest correct fix as
 a single block replacement in a single file.
 
-OUTPUT FORMAT
-
-Output STRICT JSON only — no prose, no markdown fences. The object MUST be:
-
-  {
-    "file":        "<repeat the finding's file path verbatim>",
-    "anchor_line": <integer, 1-indexed line where the change starts>,
-    "old_block":   "<exact existing text to replace, verbatim from the file>",
-    "new_block":   "<the replacement text>",
-    "explanation": "<2–4 sentences: what the patch does and why it closes the issue>"
-  }
+The `submit_patch` tool enforces the JSON shape; these are the semantics:
 
 RULES
 
@@ -125,9 +116,30 @@ functions, available imports, or call sites you need to keep consistent.
 You are STILL emitting a single-file patch: tools are for understanding,
 not for producing multi-file output.
 
-Your FINAL assistant message MUST be the JSON object alone. No tool calls
-in that final message; no prose other than the JSON.
+When you have the patch, call `submit_patch` with the structured proposal.
+That tool call IS your final answer.
 "#;
+
+fn submit_patch_tool() -> Tool {
+    Tool {
+        name: "submit_patch".to_string(),
+        description: "Submit your single-block patch proposal. Call this exactly once when \
+                      you have the fix."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "file":        { "type": "string", "description": "Repeat the finding's file path verbatim." },
+                "anchor_line": { "type": "integer", "minimum": 1, "description": "1-indexed line where the change starts." },
+                "old_block":   { "type": "string", "description": "Exact existing text to replace, verbatim from the file." },
+                "new_block":   { "type": "string", "description": "Replacement text." },
+                "explanation": { "type": "string", "description": "2-4 sentences: what the patch does and why it closes the issue." }
+            },
+            "required": ["file", "anchor_line", "old_block", "new_block", "explanation"]
+        }),
+        cache_control: None,
+    }
+}
 
 
 /// Propose a patch for a single verified finding. Reads the focus file from
@@ -158,19 +170,23 @@ pub async fn propose_one(
 
     // Sonnet still accepts temperature — but we omit it here so swapping to
     // a stricter model (the way verify uses Opus) won't break this stage.
-    let final_text = run_agent_loop(AgentRequest {
-        system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_PATCH_PROMPT}"),
-        initial_user_msg,
-        model,
-        max_tokens: MAX_TOKENS,
-        temperature: None,
-        canonical_root: &canonical_root,
-        provider,
-        stage_label: "patcher",
-    })
+    let tool_input = run_agent_loop(
+        AgentRequest {
+            system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_PATCH_PROMPT}"),
+            initial_user_msg,
+            model,
+            max_tokens: MAX_TOKENS,
+            temperature: None,
+            canonical_root: &canonical_root,
+            provider,
+            stage_label: "patcher",
+        },
+        submit_patch_tool(),
+    )
     .await?;
 
-    let proposal = parse_proposal(&final_text)?;
+    let proposal: PatchProposal = serde_json::from_value(tool_input)
+        .context("submit_patch input did not match PatchProposal schema")?;
     Ok(finalize(&vf.finding, proposal, &source))
 }
 
@@ -282,12 +298,6 @@ fn build_initial_user_message(
     writeln!(msg)?;
     msg.push_str(&with_line_numbers(source));
     Ok(msg)
-}
-
-fn parse_proposal(text: &str) -> Result<PatchProposal> {
-    let json = extract_json_object(text)
-        .ok_or_else(|| anyhow!("patcher response did not contain a JSON object: {text}"))?;
-    serde_json::from_str(json).with_context(|| format!("parsing patch JSON: {json}"))
 }
 
 /// Locate `old_block` in `source`, build the modified content, and create

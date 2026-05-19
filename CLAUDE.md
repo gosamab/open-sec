@@ -20,19 +20,25 @@ we have a grammar) a tree-sitter `Lang`. Ingest, excerpts, and the
 
 ## Provider trait + decorator order
 
-The `Provider` trait (one impl: `AnthropicProvider`) is wrapped by three
-decorators in [`providers/counting.rs`](src-tauri/src/providers/counting.rs).
-The order is load-bearing:
+The `Provider` trait (one impl: `AnthropicProvider`) is wrapped by four
+decorators. Order is load-bearing:
 
 ```
-CancellingProvider → CountingProvider → RetryingProvider → AnthropicProvider
+CancellingProvider → CountingProvider → RateLimitedProvider → RetryingProvider → AnthropicProvider
 ```
 
-- **Retry innermost** so its sleeps aren't token-counted.
-- **Counting** sees post-retry responses only.
-- **Cancellation outermost** short-circuits before any retry decision via a
-  shared `AtomicBool`. It also races the in-flight inner call against a
-  100 ms cancel-flag poll — when the flag trips mid-request, the pinned
+- **Retry innermost** so its post-429 sleeps aren't token-counted.
+- **RateLimited** sits between Counting and Retrying: its proactive sleeps
+  also stay outside Counting, and it gates retried calls too. It reads a
+  shared [`RateLimitObserver`](src-tauri/src/providers/rate_limit.rs) that
+  `AnthropicProvider` populates from each response's `anthropic-ratelimit-*`
+  headers — when a counter hits zero, the decorator sleeps until reset
+  before issuing the next call. Commands (`drive_pipeline`) construct the
+  observer and thread it through `run_scan`.
+- **Counting** sees post-retry, post-pacing responses only.
+- **Cancellation outermost** short-circuits before any retry/pace decision
+  via a shared `AtomicBool`. It also races the in-flight inner call against
+  a 100 ms cancel-flag poll — when the flag trips mid-request, the pinned
   inner future is dropped, which aborts the underlying reqwest call.
   Budget cap (`budget_total_tokens`) uses the same flag — orchestrator
   flips it at a stage boundary.
@@ -45,7 +51,17 @@ This decorator stack is why no `*_many` signature threads a cancel token.
   `anthropic-beta: extended-cache-ttl-2025-04-11`. `CacheControl::ephemeral_1h`
   must be set on the system block **and on the LAST tool only**. Setting it
   elsewhere invalidates the cache. The test
-  `cache_control_is_only_on_last_tool` enforces this.
+  `cache_control_is_only_on_last_tool` enforces this. The "last tool" is the
+  stage-specific submission tool (see below); the read-only tools precede it.
+- **Tool-use for structured outputs**: each stage's final answer is returned
+  via a stage-specific submission tool (`submit_findings` / `submit_triage` /
+  `submit_verdict` / `submit_patch`). Anthropic validates the tool input
+  against the JSON schema we send, so malformed JSON is structurally
+  impossible — no free-text JSON parsing anywhere in the pipeline. The agent
+  loop in [`scanner/agent_loop.rs`](src-tauri/src/scanner/agent_loop.rs)
+  terminates when the model calls the submission tool and returns its input
+  as `serde_json::Value`. Triage is single-shot (no read tools, no loop) but
+  uses the same tool-use mechanism.
 - **Content-block messages** (`text` / `tool_use` / `tool_result`) — not the
   OpenAI flat format.
 - **Omit `temperature` on Opus** (verify, patch). Opus 4.7 rejects it as

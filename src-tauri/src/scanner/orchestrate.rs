@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use tracing::{info, instrument, warn};
 
 use crate::providers::counting::{diff, CancellingProvider, CountingProvider, RetryingProvider, UsageCounter};
+use crate::providers::rate_limit::{RateLimitObserver, RateLimitedProvider};
 use crate::providers::{Provider, Usage};
 use crate::scanner::detect::{self, scan_with_tools};
 use crate::scanner::ingest::{self, Candidate, WalkResult};
@@ -314,7 +315,7 @@ pub struct ScanResult {
 /// `previous.verified`; patch skips findings already in `previous.patches`.
 /// Cached state is re-emitted via the event stream so the UI sees the full
 /// picture, not just the new work.
-#[instrument(skip(provider, config, events, previous), fields(root = %root.display()))]
+#[instrument(skip(provider, config, events, previous, rate_limit_observer), fields(root = %root.display()))]
 pub async fn run_scan(
     root: PathBuf,
     provider: Arc<dyn Provider>,
@@ -322,17 +323,18 @@ pub async fn run_scan(
     events: EventSender,
     cancel: Option<Arc<AtomicBool>>,
     previous: Option<ScanResult>,
+    rate_limit_observer: Option<Arc<RateLimitObserver>>,
 ) -> Result<ScanResult> {
     emit(&events, ScanEvent::Started { root: root.clone() });
 
-    // Layer decorators on the inbound provider. Order matters:
-    //   - Retry sits innermost so its sleeps don't get token-counted.
-    //   - Counting wraps it so all responses (post-retry) are tallied.
-    //   - Cancellation wraps everything so a cancel-flip short-circuits
-    //     before any retry decision.
-    // Each stage's `Usage` is computed by snapshotting the counter at stage
-    // boundaries and diffing. Already-running HTTP requests aren't aborted —
-    // cancel takes effect at the next round-trip.
+    // Decorator stack, inner → outer:
+    //   Retrying       — sleeps don't get token-counted (innermost).
+    //   RateLimited    — proactive pre-call pacing; also outside Retrying so a
+    //                    retried call is paced too. Sleeps not token-counted.
+    //   Counting       — tallies usage across all calls.
+    //   Cancelling     — short-circuits before any of the above.
+    // The inner provider (AnthropicProvider) writes to the same observer that
+    // RateLimited reads, so the loop is closed.
     let counter = UsageCounter::new();
     let retry_notify: crate::providers::counting::RetryNotify = {
         let events_clone = events.clone();
@@ -348,6 +350,9 @@ pub async fn run_scan(
         retrying = retrying.with_cancel(flag);
     }
     let mut provider: Arc<dyn Provider> = Arc::new(retrying);
+    if let Some(observer) = rate_limit_observer {
+        provider = Arc::new(RateLimitedProvider::new(provider, observer));
+    }
     provider = Arc::new(CountingProvider::new(provider, counter.clone()));
     if let Some(flag) = cancel.clone() {
         provider = Arc::new(CancellingProvider::new(provider, flag));

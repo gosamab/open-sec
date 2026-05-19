@@ -178,13 +178,13 @@ fn should_patch_decisions() {
 // --- propose_many end-to-end ---------------------------------------
 
 struct OneShotProvider {
-    body: Mutex<Option<String>>,
+    input: Mutex<Option<serde_json::Value>>,
 }
 
 impl OneShotProvider {
-    fn new(body: &str) -> Self {
+    fn new(input: serde_json::Value) -> Self {
         Self {
-            body: Mutex::new(Some(body.into())),
+            input: Mutex::new(Some(input)),
         }
     }
 }
@@ -195,17 +195,21 @@ impl Provider for OneShotProvider {
         "oneshot"
     }
     async fn generate(&self, _req: GenerationRequest) -> ProviderResult<Response> {
-        let body = self
-            .body
+        let input = self
+            .input
             .lock()
             .unwrap()
-            .clone()
+            .take()
             .expect("provider hit unexpectedly more than once");
         Ok(Response {
             id: "msg".into(),
             model: "oneshot".into(),
-            content: vec![ContentBlock::Text { text: body }],
-            stop_reason: Some(StopReason::EndTurn),
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_patch".into(),
+                name: "submit_patch".into(),
+                input,
+            }],
+            stop_reason: Some(StopReason::ToolUse),
             stop_sequence: None,
             usage: Usage::default(),
         })
@@ -220,9 +224,13 @@ async fn propose_many_filters_and_patches() {
 
     // Only the KEEP'd vuln triggers a provider call; the dropped vuln is
     // skipped without hitting the model.
-    let provider: Arc<dyn Provider> = Arc::new(OneShotProvider::new(
-        r#"{"file":"focus.ts","anchor_line":2,"old_block":"b\n","new_block":"B\n","explanation":"x"}"#,
-    ));
+    let provider: Arc<dyn Provider> = Arc::new(OneShotProvider::new(serde_json::json!({
+        "file": "focus.ts",
+        "anchor_line": 2,
+        "old_block": "b\n",
+        "new_block": "B\n",
+        "explanation": "x"
+    })));
 
     let verified = vec![
         mk_vf(FindingKind::Vuln, Some(false)),

@@ -8,6 +8,7 @@ use tracing::{info, instrument, warn};
 
 use crate::config;
 use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::rate_limit::RateLimitObserver;
 use crate::providers::Provider;
 use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
@@ -154,8 +155,11 @@ async fn drive_pipeline(
     previous: Option<ScanResult>,
 ) -> Result<ScanResult, String> {
     let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
-    let provider: Arc<dyn Provider> =
-        Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
+    let observer = RateLimitObserver::new();
+    let base = AnthropicProvider::new(api_key)
+        .map_err(|e| e.to_string())?
+        .with_rate_limit_observer(observer.clone());
+    let provider: Arc<dyn Provider> = Arc::new(base);
 
     // The initial DB row mirrors whatever state we're starting from: an
     // empty skeleton for a fresh scan, or the loaded partial for a resume.
@@ -210,6 +214,7 @@ async fn drive_pipeline(
         tx,
         Some(cancel_flag.clone()),
         previous,
+        Some(observer),
     )
     .await
     .map_err(|e| {

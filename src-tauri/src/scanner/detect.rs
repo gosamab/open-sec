@@ -1,43 +1,26 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::json;
 use tracing::instrument;
 
-use crate::providers::Provider;
+use crate::providers::{Provider, Tool};
 use crate::scanner::agent_loop::{run_agent_loop, AgentRequest};
-use crate::scanner::util::{extract_json_object, with_line_numbers};
+use crate::scanner::util::with_line_numbers;
 use crate::scanner::Finding;
 use crate::tools;
 
 pub const DEFAULT_DETECT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-/// Tool-agnostic core of the detection prompt: role, output schema, severity
-/// guide, and rules. Used verbatim in no-tools mode and prefixed with
-/// `TOOLS_PREAMBLE` in agent-loop mode.
 const BASE_DETECTION_PROMPT: &str = r#"You are a meticulous application-security reviewer.
 
 You identify two classes of issues in source code:
 1. "vuln"      — concrete vulnerabilities with a describable source → sink path.
 2. "hardening" — defense-in-depth opportunities that do not claim an exploitable bug.
 
-OUTPUT FORMAT
-
-Output STRICT JSON only — no prose, no markdown fences, no commentary.
-The top-level object must be: {"findings": [ ... ]}.
-
-Each finding MUST contain every field below:
-  kind:        "vuln" | "hardening"
-  severity:    "critical" | "high" | "medium" | "low" | "info"
-  cwe:         "CWE-<number>"        (required; pick the best-fit CWE)
-  owasp:       "A<NN>:<year>" | null (optional OWASP Top 10 mapping)
-  title:       <one-line summary, <= 80 chars>
-  file:        <repeat the focus-file path from the user message verbatim>
-  line_start:  <integer, 1-indexed>
-  line_end:    <integer, 1-indexed, inclusive>
-  description: <2–4 sentences explaining the issue>
-  data_flow:   <source → transformation → sink narrative>
+The `submit_findings` tool enforces the JSON shape; these are the semantics:
 
 SEVERITY GUIDE (apply strictly to avoid noise):
   critical — unauthenticated remote RCE, authentication bypass, exposed secrets.
@@ -59,12 +42,8 @@ RULES:
   source → sink narrative — not implied by the vuln's existence.
 - line_start / line_end must reference real lines in the focus file. Prefer the
   minimal span that contains the source → sink, not the whole enclosing function.
-- If you find nothing, return {"findings": []}.
-- Do NOT add fields not listed above. Do NOT wrap the JSON in markdown."#;
+- If you find nothing, call `submit_findings` with an empty array."#;
 
-/// Prepended to `BASE_DETECTION_PROMPT` in agent-loop mode. Explains the
-/// available tools and the conversational protocol (final message must be
-/// JSON, no trailing tool calls).
 const TOOLS_PREAMBLE: &str = r#"You have read-only access to the project under review through these tools:
   - list_imports — learn what the focus file depends on
   - read_file / read_file_range — read related files
@@ -78,8 +57,8 @@ focus file. Use tools only to gather context that materially changes your
 conclusion. Each tool call costs tokens and latency — be parsimonious. Stop
 calling tools as soon as you have what you need.
 
-Your FINAL assistant message MUST be the JSON object alone. No tool calls in
-that final message; no prose other than the JSON.
+When you're done investigating, call `submit_findings` with the structured
+findings array. That tool call IS your final answer.
 "#;
 
 #[derive(Deserialize)]
@@ -87,9 +66,41 @@ struct FindingsEnvelope {
     findings: Vec<Finding>,
 }
 
-/// Agentic scan: gives the model tool access (read_file, grep, find_references,
-/// list_directory, list_imports, git_blame) scoped to `scan_root`, runs the
-/// agent loop, and parses the final JSON.
+fn submit_findings_tool() -> Tool {
+    Tool {
+        name: "submit_findings".to_string(),
+        description: "Submit your final findings array for the focus file. Call this exactly \
+                      once when you're done investigating. Pass an empty array if the file is clean."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind":        { "type": "string", "enum": ["vuln", "hardening"] },
+                            "severity":    { "type": "string", "enum": ["critical","high","medium","low","info"] },
+                            "cwe":         { "type": "string", "description": "CWE-<number>, e.g. CWE-89" },
+                            "owasp":       { "type": ["string", "null"], "description": "A<NN>:<year>, e.g. A03:2021" },
+                            "title":       { "type": "string", "description": "One-line summary, <= 80 chars" },
+                            "file":        { "type": "string", "description": "Repeat the focus-file path verbatim" },
+                            "line_start":  { "type": "integer", "minimum": 1 },
+                            "line_end":    { "type": "integer", "minimum": 1 },
+                            "description": { "type": "string", "description": "2-4 sentences" },
+                            "data_flow":   { "type": "string", "description": "source → transformation → sink narrative" }
+                        },
+                        "required": ["kind","severity","cwe","title","file","line_start","line_end","description","data_flow"]
+                    }
+                }
+            },
+            "required": ["findings"]
+        }),
+        cache_control: None,
+    }
+}
+
 #[instrument(skip(provider, source), fields(path = %file_path.display(), root = %scan_root.display(), bytes = source.len()))]
 pub async fn scan_with_tools(
     file_path: &Path,
@@ -109,29 +120,28 @@ pub async fn scan_with_tools(
         with_line_numbers(source),
     );
 
-    let final_text = run_agent_loop(AgentRequest {
-        system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}"),
-        initial_user_msg,
-        model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        temperature: Some(0.0),
-        canonical_root: &canonical_root,
-        provider,
-        stage_label: "detect",
-    })
+    let tool_input = run_agent_loop(
+        AgentRequest {
+            system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_DETECTION_PROMPT}"),
+            initial_user_msg,
+            model,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            temperature: Some(0.0),
+            canonical_root: &canonical_root,
+            provider,
+            stage_label: "detect",
+        },
+        submit_findings_tool(),
+    )
     .await?;
 
-    finalize(&final_text, &file_label)
-}
-
-fn finalize(text: &str, file_label: &str) -> Result<Vec<Finding>> {
-    let json = extract_json_object(text)
-        .ok_or_else(|| anyhow!("model response did not contain a JSON object: {text}"))?;
-    let envelope: FindingsEnvelope =
-        serde_json::from_str(json).with_context(|| format!("parsing findings JSON: {json}"))?;
+    let envelope: FindingsEnvelope = serde_json::from_value(tool_input)
+        .context("submit_findings input did not match schema")?;
     let mut findings = envelope.findings;
     for f in &mut findings {
-        f.file = file_label.to_string();
+        // The model is told to repeat the focus path verbatim, but normalize
+        // anyway so the stable id is computed from a known value.
+        f.file = file_label.clone();
         f.assign_id();
     }
     Ok(findings)
@@ -181,19 +191,6 @@ mod agent_tests {
         }
     }
 
-    fn text_response(json_body: &str) -> Response {
-        Response {
-            id: "msg_final".into(),
-            model: "scripted".into(),
-            content: vec![ContentBlock::Text {
-                text: json_body.into(),
-            }],
-            stop_reason: Some(StopReason::EndTurn),
-            stop_sequence: None,
-            usage: Usage::default(),
-        }
-    }
-
     fn tool_use_response(id: &str, name: &str, input: serde_json::Value) -> Response {
         Response {
             id: format!("msg_{id}"),
@@ -218,8 +215,14 @@ mod agent_tests {
 
         let provider = ScriptedProvider::new(vec![
             tool_use_response("toolu_1", "read_file", json!({"path": "helper.ts"})),
-            text_response(
-                r#"{"findings":[{"kind":"vuln","severity":"high","cwe":"CWE-89","owasp":null,"title":"Test finding","file":"focus.ts","line_start":1,"line_end":2,"description":"d","data_flow":"src→sink"}]}"#,
+            tool_use_response(
+                "toolu_2",
+                "submit_findings",
+                json!({"findings":[{
+                    "kind":"vuln","severity":"high","cwe":"CWE-89","owasp":null,
+                    "title":"Test finding","file":"focus.ts","line_start":1,"line_end":2,
+                    "description":"d","data_flow":"src→sink"
+                }]}),
             ),
         ]);
 

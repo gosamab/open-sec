@@ -5,16 +5,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{instrument, warn};
 
-use crate::providers::Provider;
+use crate::providers::{Provider, Tool};
 use crate::scanner::agent_loop::{run_agent_loop, AgentRequest};
-use crate::scanner::util::{extract_json_object, resolve_focus_path, with_line_numbers};
+use crate::scanner::util::{resolve_focus_path, with_line_numbers};
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
 
@@ -98,35 +98,18 @@ discarded.
 
 You are NOT looking for new bugs. Focus only on the supplied finding.
 
-OUTPUT FORMAT
-
-Output STRICT JSON only — no prose, no markdown fences. Shape:
-
-  {
-    "is_reachable": <bool>,
-    "source_is_untrusted": <bool>,
-    "concrete_exploit": null | {
-      "kind": "http" | "args" | "file" | "other",
-      "request": null | { "method": "...", "path": "...",
-                          "headers": null | { ... },
-                          "body": null | <any JSON> },
-      "payload": "<the malicious input itself>",
-      "expected_effect": "<one-line attacker gain, e.g. 'auth bypass'>"
-    },
-    "reasoning": "<2–5 sentences justifying the verdict>"
-  }
-
-FIELD RULES:
+FIELD RULES (the `submit_verdict` tool enforces the JSON shape; these are
+semantics):
   - `is_reachable` — true iff a normal call path from an external caller
     arrives at the sink with attacker-controlled data.
   - `source_is_untrusted` — true iff the source identified in the finding's
     data_flow carries data the attacker can influence in production (HTTP
     body/query/header, file path arg, env var the attacker controls, etc.).
-  - `concrete_exploit` — REQUIRED when `is_reachable` is true. null otherwise.
-    Use `kind: "http"` and fill `request` when the exploit goes through a
-    network endpoint. Use `kind: "args"`/"file"/"other" for non-HTTP entry
-    points; `request` is null then. `payload` is always present and is the
-    malicious input itself, not a description of it.
+  - `concrete_exploit` — REQUIRED when `is_reachable` is true. Omit (or pass
+    null) otherwise. Use `kind: "http"` and fill `request` when the exploit
+    goes through a network endpoint. Use `kind: "args"`/"file"/"other` for
+    non-HTTP entry points; `request` is null then. `payload` is always
+    present and is the malicious input itself, not a description of it.
   - `reasoning` — adversarial. State WHY this is or isn't real. If discarding,
     say what assumption the detection pass made that doesn't hold.
 
@@ -150,9 +133,72 @@ the sink, and confirm the source really is reachable in production. Each
 tool call costs tokens — be parsimonious; stop as soon as you have what you
 need.
 
-Your FINAL assistant message MUST be the JSON object alone. No tool calls
-in that final message; no prose other than the JSON.
+When you have your conclusion, call the `submit_verdict` tool with the
+structured verdict. That tool call IS your final answer — do not also
+reply in free text afterward.
 "#;
+
+fn submit_verdict_tool() -> Tool {
+    Tool {
+        name: "submit_verdict".to_string(),
+        description: "Submit your final verdict for the candidate finding. \
+                      Call this exactly once when you have decided whether the \
+                      finding is reachable with a concrete exploit. Do not reply \
+                      in free text after calling this — the tool call itself is \
+                      your final answer."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "is_reachable": {
+                    "type": "boolean",
+                    "description": "True iff a normal call path from an external caller arrives at the sink with attacker-controlled data."
+                },
+                "source_is_untrusted": {
+                    "type": "boolean",
+                    "description": "True iff the source carries data the attacker can influence in production."
+                },
+                "concrete_exploit": {
+                    "type": ["object", "null"],
+                    "description": "Required when is_reachable is true; null otherwise.",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["http", "args", "file", "other"],
+                            "description": "Exploit delivery vector."
+                        },
+                        "request": {
+                            "type": ["object", "null"],
+                            "description": "Set when kind is http; null otherwise.",
+                            "properties": {
+                                "method": { "type": "string" },
+                                "path":   { "type": "string" },
+                                "headers": {},
+                                "body": {}
+                            },
+                            "required": ["method", "path"]
+                        },
+                        "payload": {
+                            "type": "string",
+                            "description": "The malicious input itself, not a description of it."
+                        },
+                        "expected_effect": {
+                            "type": "string",
+                            "description": "One-line attacker gain (e.g. 'auth bypass', 'arbitrary file read', 'RCE')."
+                        }
+                    },
+                    "required": ["kind", "payload", "expected_effect"]
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "2-5 sentences justifying the verdict. Adversarial."
+                }
+            },
+            "required": ["is_reachable", "source_is_untrusted", "reasoning"]
+        }),
+        cache_control: None,
+    }
+}
 
 /// Verify a single finding against its focus file. Hardening findings bypass
 /// the verifier (returns `VerifiedFinding { verdict: None }`). For `vuln`
@@ -188,19 +234,23 @@ pub async fn verify_one(
     // No `temperature` — Opus 4.7 rejects it ("deprecated for this model");
     // Sonnet/Haiku silently accept its absence, so unset is the most
     // compatible choice across the three stage models.
-    let final_text = run_agent_loop(AgentRequest {
-        system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_VERIFY_PROMPT}"),
-        initial_user_msg,
-        model,
-        max_tokens: MAX_TOKENS,
-        temperature: None,
-        canonical_root: &canonical_root,
-        provider,
-        stage_label: "verifier",
-    })
+    let tool_input = run_agent_loop(
+        AgentRequest {
+            system_prompt: format!("{TOOLS_PREAMBLE}\n{BASE_VERIFY_PROMPT}"),
+            initial_user_msg,
+            model,
+            max_tokens: MAX_TOKENS,
+            temperature: None,
+            canonical_root: &canonical_root,
+            provider,
+            stage_label: "verifier",
+        },
+        submit_verdict_tool(),
+    )
     .await?;
 
-    let verdict = parse_verdict(&final_text)?;
+    let verdict: Verdict = serde_json::from_value(tool_input)
+        .context("submit_verdict input did not match Verdict schema")?;
     Ok(VerifiedFinding {
         finding,
         verdict: Some(verdict),
@@ -286,13 +336,6 @@ pub async fn verify_many(
     out
 }
 
-fn parse_verdict(text: &str) -> Result<Verdict> {
-    let json = extract_json_object(text)
-        .ok_or_else(|| anyhow!("verifier response did not contain a JSON object: {text}"))?;
-    serde_json::from_str(json).with_context(|| format!("parsing verdict JSON: {json}"))
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,14 +372,16 @@ mod tests {
         }
     }
 
-    fn text_response(json_body: &str) -> Response {
+    fn submit_verdict_response(verdict_json: Value) -> Response {
         Response {
             id: "msg_final".into(),
             model: "scripted".into(),
-            content: vec![ContentBlock::Text {
-                text: json_body.into(),
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_test".into(),
+                name: "submit_verdict".into(),
+                input: verdict_json,
             }],
-            stop_reason: Some(StopReason::EndTurn),
+            stop_reason: Some(StopReason::ToolUse),
             stop_sequence: None,
             usage: Usage::default(),
         }
@@ -366,20 +411,18 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         std::fs::write(root.join("focus.ts"), "// vuln\nconst x = 1;\n").unwrap();
 
-        let provider = ScriptedProvider::new(vec![text_response(
-            r#"{
-              "is_reachable": true,
-              "source_is_untrusted": true,
-              "concrete_exploit": {
+        let provider = ScriptedProvider::new(vec![submit_verdict_response(json!({
+            "is_reachable": true,
+            "source_is_untrusted": true,
+            "concrete_exploit": {
                 "kind": "http",
                 "request": {"method":"POST","path":"/login","headers":null,
                             "body":{"email":"a@b","password":"' OR 1=1--"}},
                 "payload": "' OR 1=1--",
                 "expected_effect": "auth bypass"
-              },
-              "reasoning": "reachable from /login; password concatenated into SQL"
-            }"#,
-        )]);
+            },
+            "reasoning": "reachable from /login; password concatenated into SQL"
+        }))]);
 
         let finding = mk_finding("focus.ts", FindingKind::Vuln);
         let v = verify_one(finding, &root, &provider, "scripted").await.unwrap();
@@ -397,11 +440,12 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         std::fs::write(root.join("focus.ts"), "// safe\nconst x = 1;\n").unwrap();
 
-        let provider = ScriptedProvider::new(vec![text_response(
-            r#"{"is_reachable": false, "source_is_untrusted": true,
-                "concrete_exploit": null,
-                "reasoning": "the sink is gated by a prior check the detection pass missed"}"#,
-        )]);
+        let provider = ScriptedProvider::new(vec![submit_verdict_response(json!({
+            "is_reachable": false,
+            "source_is_untrusted": true,
+            "concrete_exploit": null,
+            "reasoning": "the sink is gated by a prior check the detection pass missed"
+        }))]);
         let finding = mk_finding("focus.ts", FindingKind::Vuln);
         let v = verify_one(finding, &root, &provider, "scripted").await.unwrap();
         let verdict = v.verdict.expect("verdict present");
@@ -427,11 +471,12 @@ mod tests {
         std::fs::write(root.join("focus.ts"), "x\n").unwrap();
 
         // Only one response — for the single vuln. Hardening must not consume one.
-        let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![text_response(
-            r#"{"is_reachable":true,"source_is_untrusted":true,
-                "concrete_exploit":{"kind":"other","payload":"x","expected_effect":"y"},
-                "reasoning":"ok"}"#,
-        )]));
+        let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![submit_verdict_response(json!({
+            "is_reachable": true,
+            "source_is_untrusted": true,
+            "concrete_exploit": {"kind": "other", "payload": "x", "expected_effect": "y"},
+            "reasoning": "ok"
+        }))]));
 
         let findings = vec![
             mk_finding("focus.ts", FindingKind::Hardening),

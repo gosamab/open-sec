@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -6,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::error::{ProviderError, ProviderResult};
+use crate::providers::rate_limit::{RateLimitObserver, RateLimitSnapshot};
 use crate::providers::{
     ContentBlock, GenerationRequest, Provider, Response, StopReason, Usage,
 };
@@ -18,6 +20,9 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     client: Client,
+    /// Where to publish parsed `anthropic-ratelimit-*` headers after each
+    /// response. `RateLimitedProvider` reads this to pace upstream calls.
+    observer: Option<Arc<RateLimitObserver>>,
 }
 
 impl AnthropicProvider {
@@ -36,7 +41,13 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             client,
+            observer: None,
         })
+    }
+
+    pub fn with_rate_limit_observer(mut self, observer: Arc<RateLimitObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     fn messages_url(&self) -> String {
@@ -143,6 +154,9 @@ impl Provider for AnthropicProvider {
         };
 
         let resp = self.build_request(&body).send().await?;
+        if let Some(observer) = &self.observer {
+            observer.record(RateLimitSnapshot::from_headers(resp.headers()));
+        }
         if !resp.status().is_success() {
             return Err(classify_error(resp).await);
         }

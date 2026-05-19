@@ -5,6 +5,51 @@ All notable changes to Open Security are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-19
+
+### Added
+
+- **Pre-scan cost estimation.** Walks the scan root, estimates per-stage
+  token usage, and surfaces USD + SAR cost projections in the onboarding
+  panel and a new rescan confirmation dialog. SAR-per-USD rate is
+  configurable in Settings (default 3.75, the SAMA peg).
+- **Proactive Anthropic rate-limit pacing.** A new provider decorator
+  reads `anthropic-ratelimit-{requests,input-tokens,output-tokens}-{limit,remaining,reset}`
+  from every response and sleeps until reset before the next call when
+  any counter hits zero — or drops below 5% of its limit. Replaces the
+  previous purely-reactive 429-retry behavior, so cascading 429 storms
+  from concurrent stage calls are gone.
+- **Model preset selector in Settings.** Each stage's model field now
+  offers Opus 4.7 / Sonnet 4.6 / Haiku 4.5 plus a Custom… fallback for
+  arbitrary IDs.
+- **`pipeline_smoke` example.** Runs the full pipeline against any folder
+  for end-to-end smoke testing without launching the UI.
+
+### Changed
+
+- **Verify defaults to Sonnet 4.6** (was Opus 4.7). Verify is per-finding
+  so the model swap is the largest single lever on scan wall time; Sonnet
+  is roughly 3–5× faster. Opus 4.7 remains selectable in Settings.
+- **Structured output via tool-use.** All four LLM stages now return their
+  final answer through a stage-specific submission tool
+  (`submit_triage`, `submit_findings`, `submit_verdict`, `submit_patch`).
+  Anthropic validates the tool input against the schema we send, so
+  malformed JSON is structurally impossible — the previous free-text JSON
+  parsing and its failure modes are gone. The agent loop terminates when
+  the model calls the submission tool.
+- **API key location documented correctly.** README, PRIVACY, and CLAUDE
+  docs now reflect that the key lives at
+  `<app_data_dir>/anthropic-api-key` (0600 perms), not the macOS Keychain.
+- Release notes no longer claim builds are unsigned — v1.0.0 onward is
+  Developer ID signed and Apple-notarized.
+
+### Removed
+
+- Dead JSON-extraction utilities (`extract_json_object`, `collect_text`,
+  per-stage `parse_*` parsers) — replaced by the submission-tool path.
+
+[1.1.0]: https://github.com/gosamab/open-sec/releases/tag/v1.1.0
+
 ## [1.0.0] — 2026-05-18
 
 First public release.

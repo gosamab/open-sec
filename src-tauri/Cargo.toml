@@ -1,6 +1,6 @@
 [package]
 name = "open-sec"
-version = "1.0.0"
+version = "1.1.0"
 description = "AI-powered security code scanner"
 authors = ["Osama Azab <gosamab@hotmail.com>"]
 license = "MIT"

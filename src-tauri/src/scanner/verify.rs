@@ -18,7 +18,7 @@ use crate::scanner::util::{resolve_focus_path, with_line_numbers};
 use crate::scanner::{Finding, FindingKind};
 use crate::tools;
 
-pub const DEFAULT_VERIFY_MODEL: &str = "claude-opus-4-7";
+pub const DEFAULT_VERIFY_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_VERIFY_CONCURRENCY: usize = 2;
 const MAX_TOKENS: u32 = 4096;
 

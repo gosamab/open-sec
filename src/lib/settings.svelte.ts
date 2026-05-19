@@ -31,7 +31,7 @@ export const DEFAULT_SETTINGS: ScanSettings = {
 	patch_concurrency: 4,
 	triage_model: 'claude-haiku-4-5',
 	detect_model: 'claude-sonnet-4-6',
-	verify_model: 'claude-opus-4-7',
+	verify_model: 'claude-sonnet-4-6',
 	patch_model: 'claude-sonnet-4-6',
 	budget_total_tokens: 0,
 	sar_per_usd: 3.75

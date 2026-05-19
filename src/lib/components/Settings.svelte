@@ -16,6 +16,21 @@
 	// Working copy — only commit on Save.
 	let draft = $state<ScanSettings>({ ...settings.value });
 
+	// Known Claude models offered as presets. The "Custom" row reveals a
+	// free-text input so users can paste any model ID (e.g. a future Sonnet
+	// version) without us needing to ship a UI update.
+	const MODEL_PRESETS = [
+		{ id: 'claude-opus-4-7', label: 'Opus 4.7 — most thorough, slowest' },
+		{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
+		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 — fastest, cheapest' }
+	] as const;
+	const CUSTOM = '__custom__';
+	const PRESET_IDS = MODEL_PRESETS.map((m) => m.id);
+
+	function presetOrCustom(value: string): string {
+		return PRESET_IDS.includes(value as (typeof PRESET_IDS)[number]) ? value : CUSTOM;
+	}
+
 	function save() {
 		settings.update(draft);
 		onClose();
@@ -105,17 +120,43 @@
 			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				Models
 			</h3>
-			<div class="grid grid-cols-[100px_1fr] items-center gap-3 text-sm">
-				<label for="m-triage" class="text-muted-foreground">Triage</label>
-				<Input id="m-triage" bind:value={draft.triage_model} class="h-8 font-mono text-xs" />
-				<label for="m-detect" class="text-muted-foreground">Detect</label>
-				<Input id="m-detect" bind:value={draft.detect_model} class="h-8 font-mono text-xs" />
-				<label for="m-verify" class="text-muted-foreground">Verify</label>
-				<Input id="m-verify" bind:value={draft.verify_model} class="h-8 font-mono text-xs" />
-				<label for="m-patch" class="text-muted-foreground">Patch</label>
-				<Input id="m-patch" bind:value={draft.patch_model} class="h-8 font-mono text-xs" />
+			<div class="grid grid-cols-[100px_1fr] items-start gap-x-3 gap-y-2 text-sm">
+				{@render modelRow('Triage', 'm-triage', () => draft.triage_model, (v) => (draft.triage_model = v))}
+				{@render modelRow('Detect', 'm-detect', () => draft.detect_model, (v) => (draft.detect_model = v))}
+				{@render modelRow('Verify', 'm-verify', () => draft.verify_model, (v) => (draft.verify_model = v))}
+				{@render modelRow('Patch', 'm-patch', () => draft.patch_model, (v) => (draft.patch_model = v))}
 			</div>
 		</section>
+
+		{#snippet modelRow(label: string, id: string, get: () => string, set: (v: string) => void)}
+			{@const value = get()}
+			{@const mode = presetOrCustom(value)}
+			<label for={id} class="pt-2 text-muted-foreground">{label}</label>
+			<div class="space-y-1">
+				<select
+					{id}
+					value={mode}
+					onchange={(e) => {
+						const next = (e.currentTarget as HTMLSelectElement).value;
+						if (next !== CUSTOM) set(next);
+					}}
+					class="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+				>
+					{#each MODEL_PRESETS as preset (preset.id)}
+						<option value={preset.id}>{preset.label}</option>
+					{/each}
+					<option value={CUSTOM}>Custom…</option>
+				</select>
+				{#if mode === CUSTOM}
+					<Input
+						value={value}
+						oninput={(e) => set((e.currentTarget as HTMLInputElement).value)}
+						placeholder="model id, e.g. claude-sonnet-4-6"
+						class="h-8 font-mono text-xs"
+					/>
+				{/if}
+			</div>
+		{/snippet}
 
 		<!-- Concurrency -->
 		<section class="space-y-3">

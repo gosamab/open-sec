@@ -1,6 +1,7 @@
 use super::*;
 use crate::scanner::ingest::WalkResult;
 use crate::scanner::orchestrate::{FileFindings, ScanResult, StageUsage};
+use crate::scanner::triage::TriageError;
 use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::{Finding, Severity};
 
@@ -28,6 +29,7 @@ fn mk_result() -> ScanResult {
         root: std::path::PathBuf::from("/tmp/proj"),
         ingest: WalkResult::default(),
         triaged: Vec::new(),
+        triage_errors: Vec::new(),
         findings_by_file: vec![FileFindings {
             path: std::path::PathBuf::from("/abs/src/foo.ts"),
             rel_path: "src/foo.ts".into(),
@@ -63,6 +65,29 @@ fn round_trip_save_load() {
     assert_eq!(loaded.findings_by_file.len(), 1);
     assert_eq!(loaded.findings_by_file[0].rel_path, "src/foo.ts");
     assert_eq!(loaded.root, std::path::PathBuf::from("/tmp/proj"));
+}
+
+#[test]
+fn triage_errors_survive_round_trip() {
+    let store = Store::open_in_memory().unwrap();
+    let mut result = mk_result();
+    result.triage_errors = vec![
+        TriageError {
+            rel_path: "src/broken.ts".into(),
+            error: "triage failed: model truncated at max_completion_tokens".into(),
+        },
+        TriageError {
+            rel_path: "src/unreadable.ts".into(),
+            error: "triage failed: read error: permission denied".into(),
+        },
+    ];
+    let scan_id = new_scan_id();
+    store.save_scan(&scan_id, now_ms(), &result, "completed").unwrap();
+    let loaded = store.load_scan(&scan_id).unwrap();
+    assert_eq!(loaded.triage_errors.len(), 2);
+    assert_eq!(loaded.triage_errors[0].rel_path, "src/broken.ts");
+    assert!(loaded.triage_errors[0].error.starts_with("triage failed:"));
+    assert_eq!(loaded.triage_errors[1].rel_path, "src/unreadable.ts");
 }
 
 #[test]

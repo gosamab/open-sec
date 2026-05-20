@@ -8,8 +8,10 @@ use tracing::{info, instrument, warn};
 
 use crate::config;
 use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::rate_limit::RateLimitObserver;
-use crate::providers::Provider;
+use crate::providers::multiplex::MultiplexProvider;
+use crate::providers::openai::OpenAiProvider;
+use crate::providers::rate_limit::MultiObserver;
+use crate::providers::{route_model_to_provider, Provider};
 use crate::export;
 use crate::scanner::detect::{scan_with_tools, DEFAULT_DETECT_MODEL};
 use crate::scanner::excerpts::{extract, Excerpt};
@@ -18,6 +20,7 @@ use crate::scanner::orchestrate::{
     run_scan, DetectError, FileFindings, ScanConfig, ScanEvent, ScanResult, ScanStatus,
     StageDurations, StageUsage,
 };
+use crate::scanner::triage::TriageError;
 use crate::scanner::patch::{
     locate, propose_one, Located, Patch, PatchProposal, DEFAULT_PATCH_MODEL,
 };
@@ -70,15 +73,81 @@ pub fn set_anthropic_key(key: String) -> Result<(), String> {
     config::store_anthropic_key(&key).map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command]
+pub fn has_openai_key() -> bool {
+    config::has_openai_key()
+}
+
+#[tauri::command]
+pub fn set_openai_key(key: String) -> Result<(), String> {
+    config::store_openai_key(&key).map_err(|e| format!("{e:#}"))
+}
+
+/// Build a multiplex provider configured for the providers each stage needs.
+/// Inspects `stage_models` (a list of `(stage_label, model)` pairs) to figure
+/// out whether Anthropic, OpenAI, or both are required. Each required key is
+/// loaded eagerly so a missing key is reported as a single, actionable error
+/// before any LLM work begins (fail-fast gate). The returned provider is
+/// rate-limit observed under the multi-provider observer.
+fn build_multiplex_provider(
+    observer: &Arc<MultiObserver>,
+    stage_models: &[(&str, &str)],
+) -> Result<Arc<dyn Provider>, String> {
+    let mut needs_anthropic: Option<(&str, &str)> = None;
+    let mut needs_openai: Option<(&str, &str)> = None;
+    for (stage, model) in stage_models {
+        match route_model_to_provider(model) {
+            "anthropic" => {
+                if needs_anthropic.is_none() {
+                    needs_anthropic = Some((stage, model));
+                }
+            }
+            "openai" => {
+                if needs_openai.is_none() {
+                    needs_openai = Some((stage, model));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut mux = MultiplexProvider::new();
+
+    if let Some((stage, model)) = needs_anthropic {
+        let key = config::load_anthropic_key().map_err(|_| {
+            format!("{stage} uses model '{model}' but ANTHROPIC_API_KEY is not configured")
+        })?;
+        let provider = AnthropicProvider::new(key)
+            .map_err(|e| e.to_string())?
+            .with_rate_limit_observer(observer.clone());
+        mux = mux.with_anthropic(Arc::new(provider));
+    }
+
+    if let Some((stage, model)) = needs_openai {
+        let key = config::load_openai_key().map_err(|_| {
+            format!("{stage} uses model '{model}' but OPENAI_API_KEY is not configured")
+        })?;
+        let provider = OpenAiProvider::new(key)
+            .map_err(|e| e.to_string())?
+            .with_rate_limit_observer(observer.clone());
+        mux = mux.with_openai(Arc::new(provider));
+    }
+
+    Ok(Arc::new(mux))
+}
+
 /// Scan a single file using the full agent loop (tools enabled).
 ///
 /// `scan_root` is optional; when omitted, the file's parent directory is used.
-/// Tools are sandboxed to that root — they cannot read outside it.
+/// Tools are sandboxed to that root — they cannot read outside it. `model`
+/// should match the user's configured `detect_model`; the multiplex routes
+/// to the matching provider.
 #[tauri::command]
 #[instrument(skip_all, fields(path = %path, scan_root = ?scan_root))]
 pub async fn scan_file(
     path: String,
     scan_root: Option<String>,
+    model: Option<String>,
 ) -> Result<Vec<Finding>, String> {
     let file = PathBuf::from(&path);
     if !file.is_file() {
@@ -97,10 +166,11 @@ pub async fn scan_file(
         .await
         .map_err(|e| format!("read {}: {e}", file.display()))?;
 
-    let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
-    let provider = AnthropicProvider::new(api_key).map_err(|e| e.to_string())?;
+    let model = model.unwrap_or_else(|| DEFAULT_DETECT_MODEL.to_string());
+    let observer = MultiObserver::new();
+    let provider = build_multiplex_provider(&observer, &[("detect_model", &model)])?;
 
-    scan_with_tools(&file, &root, &source, &provider, DEFAULT_DETECT_MODEL)
+    scan_with_tools(&file, &root, &source, provider.as_ref(), &model)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -113,6 +183,12 @@ fn apply_event(partial: &mut ScanResult, event: &ScanEvent) {
     match event {
         ScanEvent::IngestComplete { walk } => partial.ingest = walk.clone(),
         ScanEvent::TriageComplete { triaged } => partial.triaged = triaged.clone(),
+        ScanEvent::TriageFileErrored { rel_path, error } => {
+            partial.triage_errors.push(TriageError {
+                rel_path: rel_path.clone(),
+                error: error.clone(),
+            });
+        }
         ScanEvent::DetectFileComplete { rel_path, findings } => {
             // The forwarder only sees rel_path; we don't have the absolute
             // path on this side. `save_scan` reads `rel_path` exclusively,
@@ -154,12 +230,16 @@ async fn drive_pipeline(
     config: ScanConfig,
     previous: Option<ScanResult>,
 ) -> Result<ScanResult, String> {
-    let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
-    let observer = RateLimitObserver::new();
-    let base = AnthropicProvider::new(api_key)
-        .map_err(|e| e.to_string())?
-        .with_rate_limit_observer(observer.clone());
-    let provider: Arc<dyn Provider> = Arc::new(base);
+    let observer = MultiObserver::new();
+    let provider = build_multiplex_provider(
+        &observer,
+        &[
+            ("triage_model", &config.triage_model),
+            ("detect_model", &config.detect_model),
+            ("verify_model", &config.verify_model),
+            ("patch_model", &config.patch_model),
+        ],
+    )?;
 
     // The initial DB row mirrors whatever state we're starting from: an
     // empty skeleton for a fresh scan, or the loaded partial for a resume.
@@ -170,6 +250,7 @@ async fn drive_pipeline(
         root: root_path.clone(),
         ingest: WalkResult::default(),
         triaged: Vec::new(),
+        triage_errors: Vec::new(),
         findings_by_file: Vec::new(),
         detect_errors: Vec::new(),
         verified: Vec::new(),
@@ -358,24 +439,27 @@ pub struct ApplyPatchResult {
 /// Regenerate a patch for an already-verified finding, asking the model
 /// for a structurally different proposal than the previous attempts.
 /// `prior_attempts` carries the proposals already shown to the user.
+/// `model` is the patch_model from the user's settings — routed to the
+/// matching provider via the multiplex.
 #[tauri::command]
 pub async fn regenerate_patch(
     root: String,
     verified: VerifiedFinding,
     prior_attempts: Vec<PatchProposal>,
+    model: Option<String>,
 ) -> Result<Patch, String> {
     let scan_root = PathBuf::from(&root);
     if !scan_root.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
-    let api_key = config::load_anthropic_key().map_err(|e| e.to_string())?;
-    let provider: Arc<dyn Provider> =
-        Arc::new(AnthropicProvider::new(api_key).map_err(|e| e.to_string())?);
+    let model = model.unwrap_or_else(|| DEFAULT_PATCH_MODEL.to_string());
+    let observer = MultiObserver::new();
+    let provider = build_multiplex_provider(&observer, &[("patch_model", &model)])?;
     propose_one(
         &verified,
         &scan_root,
         provider.as_ref(),
-        DEFAULT_PATCH_MODEL,
+        &model,
         &prior_attempts,
     )
     .await

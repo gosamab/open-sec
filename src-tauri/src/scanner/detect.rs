@@ -74,11 +74,13 @@ fn submit_findings_tool() -> Tool {
             .to_string(),
         input_schema: json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "findings": {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
                             "kind":        { "type": "string", "enum": ["vuln", "hardening"] },
                             "severity":    { "type": "string", "enum": ["critical","high","medium","low","info"] },
@@ -91,7 +93,7 @@ fn submit_findings_tool() -> Tool {
                             "description": { "type": "string", "description": "2-4 sentences" },
                             "data_flow":   { "type": "string", "description": "source → transformation → sink narrative" }
                         },
-                        "required": ["kind","severity","cwe","title","file","line_start","line_end","description","data_flow"]
+                        "required": ["kind","severity","cwe","owasp","title","file","line_start","line_end","description","data_flow"]
                     }
                 }
             },
@@ -189,6 +191,13 @@ mod agent_tests {
             }
             Ok(r.remove(0))
         }
+    }
+
+    #[test]
+    fn submit_findings_tool_is_openai_strict_compatible() {
+        crate::providers::test_support::assert_openai_strict_compatible(
+            &submit_findings_tool().input_schema,
+        );
     }
 
     fn tool_use_response(id: &str, name: &str, input: serde_json::Value) -> Response {

@@ -4,9 +4,16 @@
 	import {
 		CONCURRENCY_BOUNDS,
 		DEFAULT_SETTINGS,
+		MODEL_OPTIONS,
 		settings,
 		type ScanSettings
 	} from '$lib/settings.svelte';
+	import {
+		hasAnthropicKey,
+		hasOpenAiKey,
+		setAnthropicKey,
+		setOpenAiKey
+	} from '$lib/ipc';
 
 	interface Props {
 		onClose: () => void;
@@ -16,19 +23,80 @@
 	// Working copy — only commit on Save.
 	let draft = $state<ScanSettings>({ ...settings.value });
 
-	// Known Claude models offered as presets. The "Custom" row reveals a
+	// Known model presets grouped by provider. The "Custom" row reveals a
 	// free-text input so users can paste any model ID (e.g. a future Sonnet
 	// version) without us needing to ship a UI update.
-	const MODEL_PRESETS = [
-		{ id: 'claude-opus-4-7', label: 'Opus 4.7 — most thorough, slowest' },
-		{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
-		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 — fastest, cheapest' }
-	] as const;
 	const CUSTOM = '__custom__';
-	const PRESET_IDS = MODEL_PRESETS.map((m) => m.id);
+	const ALL_PRESET_IDS = [
+		...MODEL_OPTIONS.Anthropic.map((m) => m.id),
+		...MODEL_OPTIONS.OpenAI.map((m) => m.id)
+	];
 
 	function presetOrCustom(value: string): string {
-		return PRESET_IDS.includes(value as (typeof PRESET_IDS)[number]) ? value : CUSTOM;
+		return ALL_PRESET_IDS.includes(value) ? value : CUSTOM;
+	}
+
+	// --- API keys ---
+	let anthropicKeyStatus = $state<boolean | null>(null);
+	let openaiKeyStatus = $state<boolean | null>(null);
+	let anthropicKeyInput = $state('');
+	let openaiKeyInput = $state('');
+	let anthropicSaving = $state(false);
+	let openaiSaving = $state(false);
+	let anthropicError = $state<string | null>(null);
+	let openaiError = $state<string | null>(null);
+
+	$effect(() => {
+		void (async () => {
+			anthropicKeyStatus = await hasAnthropicKey().catch(() => false);
+			openaiKeyStatus = await hasOpenAiKey().catch(() => false);
+		})();
+	});
+
+	async function saveAnthropicKey() {
+		const trimmed = anthropicKeyInput.trim();
+		if (!trimmed) {
+			anthropicError = 'Paste your API key first.';
+			return;
+		}
+		if (!trimmed.startsWith('sk-ant-')) {
+			anthropicError = "Anthropic keys start with 'sk-ant-'.";
+			return;
+		}
+		anthropicSaving = true;
+		anthropicError = null;
+		try {
+			await setAnthropicKey(trimmed);
+			anthropicKeyInput = '';
+			anthropicKeyStatus = true;
+		} catch (e) {
+			anthropicError = e instanceof Error ? e.message : String(e);
+		} finally {
+			anthropicSaving = false;
+		}
+	}
+
+	async function saveOpenAiKey() {
+		const trimmed = openaiKeyInput.trim();
+		if (!trimmed) {
+			openaiError = 'Paste your API key first.';
+			return;
+		}
+		if (!trimmed.startsWith('sk-')) {
+			openaiError = "OpenAI keys start with 'sk-'.";
+			return;
+		}
+		openaiSaving = true;
+		openaiError = null;
+		try {
+			await setOpenAiKey(trimmed);
+			openaiKeyInput = '';
+			openaiKeyStatus = true;
+		} catch (e) {
+			openaiError = e instanceof Error ? e.message : String(e);
+		} finally {
+			openaiSaving = false;
+		}
 	}
 
 	function save() {
@@ -103,24 +171,105 @@
 	></button>
 	<div
 		bind:this={dialog}
-		class="relative w-full max-w-2xl space-y-6 rounded-lg border border-border bg-background p-6 shadow-xl"
+		class="relative flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-background shadow-xl"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Settings"
 	>
-		<header class="space-y-1">
+		<header class="space-y-1 border-b border-border px-6 py-4">
 			<h2 class="text-lg font-semibold tracking-tight">Settings</h2>
 			<p class="text-xs text-muted-foreground">
 				Per-stage model and concurrency overrides. Saved locally; applied on the next scan.
 			</p>
 		</header>
 
+		<div class="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+			<!-- API keys -->
+			<section class="space-y-3">
+				<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
+					API Keys
+				</h3>
+				<div class="grid grid-cols-[120px_1fr] items-start gap-x-3 gap-y-3 text-sm">
+					{@render keyRow(
+						'Anthropic',
+						'k-anthropic',
+						'sk-ant-…',
+						anthropicKeyStatus,
+						() => anthropicKeyInput,
+						(v) => (anthropicKeyInput = v),
+						() => anthropicSaving,
+						() => anthropicError,
+						saveAnthropicKey
+					)}
+					{@render keyRow(
+						'OpenAI',
+						'k-openai',
+						'sk-…',
+						openaiKeyStatus,
+						() => openaiKeyInput,
+						(v) => (openaiKeyInput = v),
+						() => openaiSaving,
+						() => openaiError,
+						saveOpenAiKey
+					)}
+				</div>
+			</section>
+
+			{#snippet keyRow(
+				label: string,
+				id: string,
+				placeholder: string,
+				status: boolean | null,
+				getValue: () => string,
+				setValue: (v: string) => void,
+				getSaving: () => boolean,
+				getError: () => string | null,
+				onSave: () => void
+			)}
+				<div class="flex flex-wrap items-center gap-2 pt-2">
+					<span class="text-muted-foreground">{label}</span>
+					{#if status === true}
+						<span
+							class="rounded-full bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-500"
+						>
+							set
+						</span>
+					{:else if status === false}
+						<span
+							class="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+						>
+							not set
+						</span>
+					{/if}
+				</div>
+				<div class="space-y-1">
+					<div class="flex items-center gap-2">
+						<Input
+							{id}
+							type="password"
+							value={getValue()}
+							oninput={(e) => setValue((e.currentTarget as HTMLInputElement).value)}
+							{placeholder}
+							autocomplete="off"
+							spellcheck="false"
+							class="h-8 font-mono text-xs"
+						/>
+						<Button size="sm" onclick={onSave} disabled={getSaving() || !getValue().trim()}>
+							{getSaving() ? 'Saving…' : 'Save'}
+						</Button>
+					</div>
+					{#if getError()}
+						<p class="text-xs text-destructive" role="alert">{getError()}</p>
+					{/if}
+				</div>
+			{/snippet}
+
 		<!-- Models -->
 		<section class="space-y-3">
 			<h3 class="text-[0.625rem] font-medium tracking-wider text-muted-foreground uppercase">
 				Models
 			</h3>
-			<div class="grid grid-cols-[100px_1fr] items-start gap-x-3 gap-y-2 text-sm">
+			<div class="grid grid-cols-[120px_1fr] items-start gap-x-3 gap-y-2 text-sm">
 				{@render modelRow('Triage', 'm-triage', () => draft.triage_model, (v) => (draft.triage_model = v))}
 				{@render modelRow('Detect', 'm-detect', () => draft.detect_model, (v) => (draft.detect_model = v))}
 				{@render modelRow('Verify', 'm-verify', () => draft.verify_model, (v) => (draft.verify_model = v))}
@@ -142,8 +291,12 @@
 					}}
 					class="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
 				>
-					{#each MODEL_PRESETS as preset (preset.id)}
-						<option value={preset.id}>{preset.label}</option>
+					{#each Object.entries(MODEL_OPTIONS) as [provider, presets] (provider)}
+						<optgroup label={provider}>
+							{#each presets as preset (preset.id)}
+								<option value={preset.id}>{preset.label}</option>
+							{/each}
+						</optgroup>
 					{/each}
 					<option value={CUSTOM}>Custom…</option>
 				</select>
@@ -151,7 +304,7 @@
 					<Input
 						value={value}
 						oninput={(e) => set((e.currentTarget as HTMLInputElement).value)}
-						placeholder="model id, e.g. claude-sonnet-4-6"
+						placeholder="model id, e.g. claude-sonnet-4-6 or gpt-5-mini"
 						class="h-8 font-mono text-xs"
 					/>
 				{/if}
@@ -258,8 +411,9 @@
 				</div>
 			</div>
 		</section>
+		</div>
 
-		<footer class="flex items-center justify-between border-t border-border pt-4">
+		<footer class="flex items-center justify-between border-t border-border px-6 py-4">
 			<Button variant="outline" size="sm" onclick={reset}>Reset to defaults</Button>
 			<div class="flex gap-2">
 				<Button variant="outline" size="sm" onclick={onClose}>Cancel</Button>

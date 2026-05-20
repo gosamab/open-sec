@@ -164,10 +164,18 @@ export interface DetectError {
 	error: string;
 }
 
+/** Per-file triage failure. Previously dropped silently — now surfaced so a
+ *  scan whose triage stage broke doesn't masquerade as "clean". */
+export interface TriageError {
+	rel_path: string;
+	error: string;
+}
+
 export interface ScanResult {
 	root: string;
 	ingest: WalkResult;
 	triaged: TriagedFile[];
+	triage_errors: TriageError[];
 	findings_by_file: FileFindings[];
 	detect_errors: DetectError[];
 	verified: VerifiedFinding[];
@@ -181,6 +189,7 @@ export type ScanEvent =
 	| { kind: 'started'; root: string }
 	| { kind: 'ingest_complete'; walk: WalkResult }
 	| { kind: 'triage_complete'; triaged: TriagedFile[] }
+	| { kind: 'triage_file_errored'; rel_path: string; error: string }
 	| { kind: 'detect_file_complete'; rel_path: string; findings: Finding[] }
 	| { kind: 'detect_file_errored'; rel_path: string; error: string }
 	| { kind: 'detect_complete'; total: number }
@@ -200,8 +209,24 @@ export async function setAnthropicKey(key: string): Promise<void> {
 	return invoke<void>('set_anthropic_key', { key });
 }
 
-export async function scanFile(path: string, scanRoot?: string): Promise<Finding[]> {
-	return invoke<Finding[]>('scan_file', { path, scanRoot: scanRoot ?? null });
+export async function hasOpenAiKey(): Promise<boolean> {
+	return invoke<boolean>('has_openai_key');
+}
+
+export async function setOpenAiKey(key: string): Promise<void> {
+	return invoke<void>('set_openai_key', { key });
+}
+
+export async function scanFile(
+	path: string,
+	scanRoot?: string,
+	model?: string
+): Promise<Finding[]> {
+	return invoke<Finding[]>('scan_file', {
+		path,
+		scanRoot: scanRoot ?? null,
+		model: model ?? null
+	});
 }
 
 /** Subscribe to scan events. Caller must invoke the returned function to unlisten. */
@@ -320,13 +345,21 @@ export async function saveTextFile(path: string, content: string): Promise<void>
 }
 
 /** Ask the patcher for an alternative fix that's structurally different
- *  from the supplied prior attempts. */
+ *  from the supplied prior attempts. `model` should match the user's
+ *  configured `patch_model` so the regenerate routes to the same provider
+ *  that produced the original patch. */
 export async function regeneratePatch(
 	root: string,
 	verified: VerifiedFinding,
-	priorAttempts: PatchProposal[]
+	priorAttempts: PatchProposal[],
+	model?: string
 ): Promise<Patch> {
-	return invoke<Patch>('regenerate_patch', { root, verified, priorAttempts });
+	return invoke<Patch>('regenerate_patch', {
+		root,
+		verified,
+		priorAttempts,
+		model: model ?? null
+	});
 }
 
 // ---------- persisted scans -----------------------------------------------

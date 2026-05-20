@@ -1,12 +1,16 @@
-//! Proactive rate-limit pacing for the Anthropic API.
+//! Proactive rate-limit pacing for upstream providers.
 //!
-//! `AnthropicProvider` writes the latest `anthropic-ratelimit-*` headers into
-//! a shared [`RateLimitObserver`] after every response. [`RateLimitedProvider`]
-//! reads that observer before each call and sleeps until reset when a counter
-//! has hit zero — turning a soon-to-be-429 into a clean wait, instead of the
-//! cascading retry storm that happens when many concurrent calls all 429 at
-//! once. Stack position is documented in CLAUDE.md.
+//! Each base provider parses the rate-limit headers from its own responses
+//! into a [`RateLimitSnapshot`] and records it into a shared [`MultiObserver`]
+//! keyed by provider name. [`RateLimitedProvider`] sits in the decorator
+//! stack and, before each call, looks up the snapshot for the provider that
+//! will actually handle the request (derived from `req.model`). If a counter
+//! has hit zero or fallen below the low-water mark, it sleeps until reset —
+//! turning a soon-to-be-429 into a clean wait, instead of the cascading retry
+//! storm that happens when many concurrent calls all 429 at once. Stack
+//! position is documented in CLAUDE.md.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -35,17 +39,38 @@ pub struct RateLimitSnapshot {
 impl RateLimitSnapshot {
     /// Read the `anthropic-ratelimit-*` headers from a response. Doesn't
     /// consume the response body.
-    pub fn from_headers(h: &HeaderMap) -> Self {
+    pub fn from_anthropic_headers(h: &HeaderMap) -> Self {
         Self {
             requests_limit: parse_u64(h, "anthropic-ratelimit-requests-limit"),
             requests_remaining: parse_u64(h, "anthropic-ratelimit-requests-remaining"),
-            requests_reset: parse_reset(h, "anthropic-ratelimit-requests-reset"),
+            requests_reset: parse_rfc3339_reset(h, "anthropic-ratelimit-requests-reset"),
             input_tokens_limit: parse_u64(h, "anthropic-ratelimit-input-tokens-limit"),
             input_tokens_remaining: parse_u64(h, "anthropic-ratelimit-input-tokens-remaining"),
-            input_tokens_reset: parse_reset(h, "anthropic-ratelimit-input-tokens-reset"),
+            input_tokens_reset: parse_rfc3339_reset(h, "anthropic-ratelimit-input-tokens-reset"),
             output_tokens_limit: parse_u64(h, "anthropic-ratelimit-output-tokens-limit"),
             output_tokens_remaining: parse_u64(h, "anthropic-ratelimit-output-tokens-remaining"),
-            output_tokens_reset: parse_reset(h, "anthropic-ratelimit-output-tokens-reset"),
+            output_tokens_reset: parse_rfc3339_reset(h, "anthropic-ratelimit-output-tokens-reset"),
+        }
+    }
+
+    /// Read the OpenAI `x-ratelimit-*` headers from a response. OpenAI
+    /// exposes only a requests bucket and a single tokens bucket (not split
+    /// into input/output). We map the tokens bucket to the `input_tokens_*`
+    /// slot — the conservative one already used by pacing logic. The
+    /// `output_tokens_*` triple stays `None`. Reset values are duration
+    /// strings like `"6s"`, `"1m30s"`, `"500ms"`, so we resolve them to an
+    /// absolute `SystemTime` via `now + parsed`.
+    pub fn from_openai_headers(h: &HeaderMap, now: SystemTime) -> Self {
+        Self {
+            requests_limit: parse_u64(h, "x-ratelimit-limit-requests"),
+            requests_remaining: parse_u64(h, "x-ratelimit-remaining-requests"),
+            requests_reset: parse_duration_reset(h, "x-ratelimit-reset-requests", now),
+            input_tokens_limit: parse_u64(h, "x-ratelimit-limit-tokens"),
+            input_tokens_remaining: parse_u64(h, "x-ratelimit-remaining-tokens"),
+            input_tokens_reset: parse_duration_reset(h, "x-ratelimit-reset-tokens", now),
+            output_tokens_limit: None,
+            output_tokens_remaining: None,
+            output_tokens_reset: None,
         }
     }
 
@@ -89,34 +114,43 @@ impl RateLimitSnapshot {
     }
 }
 
-/// Shared mutable cell holding the latest snapshot. Writer:
-/// `AnthropicProvider`. Reader: `RateLimitedProvider`.
+/// Shared cell holding the latest snapshot per provider. Writers: each base
+/// provider (Anthropic, OpenAI, ...) records under its stable key. Reader:
+/// `RateLimitedProvider` looks up the snapshot for the provider that will
+/// handle the next call (chosen via `req.model`).
 #[derive(Debug, Default)]
-pub struct RateLimitObserver {
-    snapshot: Mutex<Option<RateLimitSnapshot>>,
+pub struct MultiObserver {
+    snapshots: Mutex<HashMap<&'static str, RateLimitSnapshot>>,
 }
 
-impl RateLimitObserver {
+impl MultiObserver {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    pub fn record(&self, snapshot: RateLimitSnapshot) {
-        *self.snapshot.lock().unwrap() = Some(snapshot);
+    pub fn record(&self, provider: &'static str, snapshot: RateLimitSnapshot) {
+        self.snapshots.lock().unwrap().insert(provider, snapshot);
     }
 
-    pub fn current(&self) -> Option<RateLimitSnapshot> {
-        self.snapshot.lock().unwrap().clone()
+    pub fn current(&self, provider: &str) -> Option<RateLimitSnapshot> {
+        self.snapshots.lock().unwrap().get(provider).cloned()
     }
 }
 
+/// Function used to map a model id to the provider key that will handle it.
+/// Same logic that the multiplex provider uses for dispatch — kept here as
+/// a fn pointer so the pacing decorator can read the right snapshot without
+/// taking a dependency on the multiplex.
+pub type ModelRouter = fn(&str) -> &'static str;
+
 /// `Provider` decorator that sleeps before each call when the most recent
-/// snapshot shows a tripped counter (exhausted or below `low_water_fraction`).
-/// Sleeps cap at `max_wait` to bound pathological clock skew or stale
-/// snapshots.
+/// snapshot (for the routed provider) shows a tripped counter (exhausted or
+/// below `low_water_fraction`). Sleeps cap at `max_wait` to bound
+/// pathological clock skew or stale snapshots.
 pub struct RateLimitedProvider {
     inner: Arc<dyn Provider>,
-    observer: Arc<RateLimitObserver>,
+    observer: Arc<MultiObserver>,
+    router: ModelRouter,
     safety: Duration,
     max_wait: Duration,
     low_water_fraction: f64,
@@ -129,10 +163,15 @@ impl RateLimitedProvider {
     /// per-minute budget is the right neighborhood.
     const DEFAULT_LOW_WATER: f64 = 0.05;
 
-    pub fn new(inner: Arc<dyn Provider>, observer: Arc<RateLimitObserver>) -> Self {
+    pub fn new(
+        inner: Arc<dyn Provider>,
+        observer: Arc<MultiObserver>,
+        router: ModelRouter,
+    ) -> Self {
         Self {
             inner,
             observer,
+            router,
             safety: Duration::from_millis(500),
             max_wait: Duration::from_secs(120),
             low_water_fraction: Self::DEFAULT_LOW_WATER,
@@ -152,20 +191,23 @@ impl Provider for RateLimitedProvider {
     }
 
     async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response> {
-        if let Some(snap) = self.observer.current() {
+        let provider_key = (self.router)(&req.model);
+        if let Some(snap) = self.observer.current(provider_key) {
             if let Some(wait) =
                 snap.wait_until_reset(SystemTime::now(), self.safety, self.low_water_fraction)
             {
                 let capped = wait.min(self.max_wait);
                 if capped >= Duration::from_millis(50) {
                     info!(
+                        provider = provider_key,
                         wait_ms = capped.as_millis() as u64,
-                        "anthropic rate-limit pacing before next call"
+                        "rate-limit pacing before next call"
                     );
                     tokio::time::sleep(capped).await;
                 }
                 if wait > self.max_wait {
                     warn!(
+                        provider = provider_key,
                         wait_ms = wait.as_millis() as u64,
                         cap_ms = self.max_wait.as_millis() as u64,
                         "rate-limit reset is further than cap; will retry early and possibly 429"
@@ -181,8 +223,54 @@ fn parse_u64(h: &HeaderMap, name: &str) -> Option<u64> {
     h.get(name)?.to_str().ok()?.parse().ok()
 }
 
-fn parse_reset(h: &HeaderMap, name: &str) -> Option<SystemTime> {
+fn parse_rfc3339_reset(h: &HeaderMap, name: &str) -> Option<SystemTime> {
     parse_rfc3339_utc(h.get(name)?.to_str().ok()?)
+}
+
+fn parse_duration_reset(h: &HeaderMap, name: &str, now: SystemTime) -> Option<SystemTime> {
+    let d = parse_openai_duration(h.get(name)?.to_str().ok()?)?;
+    Some(now + d)
+}
+
+/// Parse OpenAI's compact rate-limit duration strings like `"6s"`,
+/// `"1m30s"`, `"500ms"`, `"1h2m3s"`. Returns `None` on any unexpected input.
+/// Units recognized: `ms`, `s`, `m`, `h`. The `ms` suffix is checked before
+/// `s`/`m` so `"500ms"` doesn't misparse as `500s`.
+fn parse_openai_duration(s: &str) -> Option<Duration> {
+    let bytes = s.trim().as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut total = Duration::ZERO;
+    let mut i = 0;
+    while i < bytes.len() {
+        // Read the number.
+        let num_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == num_start {
+            return None;
+        }
+        let n: u64 = std::str::from_utf8(&bytes[num_start..i]).ok()?.parse().ok()?;
+        // Read the unit. `ms` first; then single-char units.
+        if i + 2 <= bytes.len() && &bytes[i..i + 2] == b"ms" {
+            total += Duration::from_millis(n);
+            i += 2;
+        } else if i < bytes.len() {
+            let unit_secs: u64 = match bytes[i] {
+                b's' => 1,
+                b'm' => 60,
+                b'h' => 3600,
+                _ => return None,
+            };
+            total = total.checked_add(Duration::from_secs(n.checked_mul(unit_secs)?))?;
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(total)
 }
 
 /// Minimal RFC 3339 parser for the format Anthropic actually emits:
@@ -275,19 +363,69 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_reads_present_headers_skips_missing() {
+    fn snapshot_reads_present_anthropic_headers_skips_missing() {
         let h = headers(&[
             ("anthropic-ratelimit-requests-remaining", "42"),
             ("anthropic-ratelimit-requests-reset", "2024-01-15T00:00:00Z"),
             ("anthropic-ratelimit-input-tokens-remaining", "0"),
             // output-tokens-* intentionally absent
         ]);
-        let s = RateLimitSnapshot::from_headers(&h);
+        let s = RateLimitSnapshot::from_anthropic_headers(&h);
         assert_eq!(s.requests_remaining, Some(42));
         assert!(s.requests_reset.is_some());
         assert_eq!(s.input_tokens_remaining, Some(0));
         assert!(s.input_tokens_reset.is_none());
         assert!(s.output_tokens_remaining.is_none());
+    }
+
+    #[test]
+    fn snapshot_reads_present_openai_headers_skips_missing() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let h = headers(&[
+            ("x-ratelimit-limit-requests", "100"),
+            ("x-ratelimit-remaining-requests", "75"),
+            ("x-ratelimit-reset-requests", "6s"),
+            ("x-ratelimit-remaining-tokens", "0"),
+            ("x-ratelimit-reset-tokens", "1m30s"),
+            // limit-tokens absent
+        ]);
+        let s = RateLimitSnapshot::from_openai_headers(&h, now);
+        assert_eq!(s.requests_limit, Some(100));
+        assert_eq!(s.requests_remaining, Some(75));
+        assert_eq!(s.requests_reset, Some(now + Duration::from_secs(6)));
+        assert_eq!(s.input_tokens_remaining, Some(0));
+        assert_eq!(s.input_tokens_reset, Some(now + Duration::from_secs(90)));
+        // OpenAI doesn't split tokens into input/output; output stays None.
+        assert!(s.output_tokens_remaining.is_none());
+        assert!(s.output_tokens_reset.is_none());
+    }
+
+    #[test]
+    fn parses_openai_reset_durations() {
+        assert_eq!(parse_openai_duration("6s"), Some(Duration::from_secs(6)));
+        assert_eq!(
+            parse_openai_duration("1m30s"),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            parse_openai_duration("500ms"),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_openai_duration("1h2m3s"),
+            Some(Duration::from_secs(3723))
+        );
+        assert_eq!(parse_openai_duration("0s"), Some(Duration::ZERO));
+        // ms must be checked before s — otherwise "500ms" would misparse.
+        assert_eq!(
+            parse_openai_duration("100ms"),
+            Some(Duration::from_millis(100))
+        );
+        // Garbage inputs return None.
+        assert_eq!(parse_openai_duration(""), None);
+        assert_eq!(parse_openai_duration("abc"), None);
+        assert_eq!(parse_openai_duration("12"), None); // no unit
+        assert_eq!(parse_openai_duration("12x"), None); // unknown unit
     }
 
     #[test]
@@ -371,14 +509,30 @@ mod tests {
     }
 
     #[test]
-    fn observer_round_trip() {
-        let obs = RateLimitObserver::new();
-        assert!(obs.current().is_none());
-        let s = RateLimitSnapshot {
+    fn multi_observer_per_provider_isolation() {
+        let obs = MultiObserver::new();
+        assert!(obs.current("anthropic").is_none());
+        assert!(obs.current("openai").is_none());
+
+        let anth_snap = RateLimitSnapshot {
             requests_remaining: Some(3),
             ..Default::default()
         };
-        obs.record(s.clone());
-        assert_eq!(obs.current(), Some(s));
+        obs.record("anthropic", anth_snap.clone());
+
+        assert_eq!(obs.current("anthropic"), Some(anth_snap));
+        assert!(
+            obs.current("openai").is_none(),
+            "recording anthropic must not leak into openai's slot"
+        );
+
+        // Recording for a different provider doesn't displace the first.
+        let oai_snap = RateLimitSnapshot {
+            input_tokens_remaining: Some(0),
+            ..Default::default()
+        };
+        obs.record("openai", oai_snap.clone());
+        assert!(obs.current("anthropic").is_some());
+        assert_eq!(obs.current("openai"), Some(oai_snap));
     }
 }

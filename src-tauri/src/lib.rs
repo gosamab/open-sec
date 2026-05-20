@@ -45,7 +45,7 @@ pub fn run() {
                 ),
             };
             std::fs::create_dir_all(&app_data).ok();
-            config::init_key_path(&app_data);
+            config::init_key_paths(&app_data);
             let db_path = app_data.join("open-sec.db");
             let store = match store::Store::open(&db_path) {
                 Ok(s) => s,
@@ -64,6 +64,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::has_anthropic_key,
             commands::set_anthropic_key,
+            commands::has_openai_key,
+            commands::set_openai_key,
             commands::scan_file,
             commands::run_pipeline,
             commands::resume_pipeline,

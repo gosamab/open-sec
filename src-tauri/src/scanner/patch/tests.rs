@@ -25,6 +25,15 @@ fn mk_finding(file: &str, kind: FindingKind) -> Finding {
     f
 }
 
+// --- submission schema ---------------------------------------------
+
+#[test]
+fn submit_patch_tool_is_openai_strict_compatible() {
+    crate::providers::test_support::assert_openai_strict_compatible(
+        &submit_patch_tool().input_schema,
+    );
+}
+
 // --- locate ---------------------------------------------------------
 
 #[test]

@@ -74,3 +74,9 @@ DROP INDEX IF EXISTS findings_finding_id_idx;
 ALTER TABLE scans DROP COLUMN finished_at;
 ALTER TABLE scans DROP COLUMN hardening_findings;
 "#;
+
+// Per-file triage failures were previously dropped silently — now persisted
+// so a re-opened scan shows the user the same red badges as the live run.
+pub(super) const SCHEMA_V6: &str = r#"
+ALTER TABLE scans ADD COLUMN triage_errors_json TEXT NOT NULL DEFAULT '[]';
+"#;

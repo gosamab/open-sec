@@ -149,6 +149,7 @@ fn submit_verdict_tool() -> Tool {
             .to_string(),
         input_schema: json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "is_reachable": {
                     "type": "boolean",
@@ -160,6 +161,7 @@ fn submit_verdict_tool() -> Tool {
                 },
                 "concrete_exploit": {
                     "type": ["object", "null"],
+                    "additionalProperties": false,
                     "description": "Required when is_reachable is true; null otherwise.",
                     "properties": {
                         "kind": {
@@ -169,14 +171,15 @@ fn submit_verdict_tool() -> Tool {
                         },
                         "request": {
                             "type": ["object", "null"],
+                            "additionalProperties": false,
                             "description": "Set when kind is http; null otherwise.",
                             "properties": {
-                                "method": { "type": "string" },
-                                "path":   { "type": "string" },
-                                "headers": {},
-                                "body": {}
+                                "method":  { "type": "string" },
+                                "path":    { "type": "string" },
+                                "headers": { "type": ["string", "null"], "description": "Headers as text or JSON-encoded string; null if not applicable." },
+                                "body":    { "type": ["string", "null"], "description": "Body as text or JSON-encoded string; null if not applicable." }
                             },
-                            "required": ["method", "path"]
+                            "required": ["method", "path", "headers", "body"]
                         },
                         "payload": {
                             "type": "string",
@@ -187,14 +190,14 @@ fn submit_verdict_tool() -> Tool {
                             "description": "One-line attacker gain (e.g. 'auth bypass', 'arbitrary file read', 'RCE')."
                         }
                     },
-                    "required": ["kind", "payload", "expected_effect"]
+                    "required": ["kind", "request", "payload", "expected_effect"]
                 },
                 "reasoning": {
                     "type": "string",
                     "description": "2-5 sentences justifying the verdict. Adversarial."
                 }
             },
-            "required": ["is_reachable", "source_is_untrusted", "reasoning"]
+            "required": ["is_reachable", "source_is_untrusted", "concrete_exploit", "reasoning"]
         }),
         cache_control: None,
     }
@@ -370,6 +373,13 @@ mod tests {
             }
             Ok(r.remove(0))
         }
+    }
+
+    #[test]
+    fn submit_verdict_tool_is_openai_strict_compatible() {
+        crate::providers::test_support::assert_openai_strict_compatible(
+            &submit_verdict_tool().input_schema,
+        );
     }
 
     fn submit_verdict_response(verdict_json: Value) -> Response {

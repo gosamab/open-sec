@@ -391,9 +391,10 @@
 							reason.
 						</p>
 					{:else}
-						<p class="text-destructive">Detect errored on this file.</p>
+						<p class="text-destructive">Scan errored on this file.</p>
 						<p class="leading-relaxed text-muted-foreground/80">
-							See detail pane for the error message.
+							See detail pane for the error message (the stage — triage or detect — is
+							in the message prefix).
 						</p>
 					{/if}
 				</div>

@@ -17,12 +17,13 @@ use tokio::task::JoinSet;
 use tracing::{info, instrument, warn};
 
 use crate::providers::counting::{diff, CancellingProvider, CountingProvider, RetryingProvider, UsageCounter};
-use crate::providers::rate_limit::{RateLimitObserver, RateLimitedProvider};
+use crate::providers::rate_limit::{MultiObserver, RateLimitedProvider};
+use crate::providers::route_model_to_provider;
 use crate::providers::{Provider, Usage};
 use crate::scanner::detect::{self, scan_with_tools};
 use crate::scanner::ingest::{self, Candidate, WalkResult};
 use crate::scanner::patch::{self, propose_many, Patch};
-use crate::scanner::triage::{self, triage_many, Priority, TriagedFile};
+use crate::scanner::triage::{self, triage_many, Priority, TriageError, TriagedFile};
 use crate::scanner::verify::{self, verify_many, VerifiedFinding};
 use crate::scanner::{Finding, FindingKind};
 
@@ -40,6 +41,14 @@ pub enum ScanEvent {
     },
     TriageComplete {
         triaged: Vec<TriagedFile>,
+    },
+    /// One file failed triage (read error, model error, malformed/truncated
+    /// response). Emitted so the UI can show the user that this file fell
+    /// out of the pipeline — without this signal, the file would silently
+    /// be absent from the results and the scan would look "clean".
+    TriageFileErrored {
+        rel_path: String,
+        error: String,
     },
     /// One detected file's findings landed. Emitted as each file finishes
     /// so the UI can populate the left pane progressively.
@@ -284,6 +293,8 @@ pub struct ScanResult {
     pub root: PathBuf,
     pub ingest: WalkResult,
     pub triaged: Vec<TriagedFile>,
+    #[serde(default)]
+    pub triage_errors: Vec<TriageError>,
     pub findings_by_file: Vec<FileFindings>,
     #[serde(default)]
     pub detect_errors: Vec<DetectError>,
@@ -323,7 +334,7 @@ pub async fn run_scan(
     events: EventSender,
     cancel: Option<Arc<AtomicBool>>,
     previous: Option<ScanResult>,
-    rate_limit_observer: Option<Arc<RateLimitObserver>>,
+    rate_limit_observer: Option<Arc<MultiObserver>>,
 ) -> Result<ScanResult> {
     emit(&events, ScanEvent::Started { root: root.clone() });
 
@@ -351,7 +362,11 @@ pub async fn run_scan(
     }
     let mut provider: Arc<dyn Provider> = Arc::new(retrying);
     if let Some(observer) = rate_limit_observer {
-        provider = Arc::new(RateLimitedProvider::new(provider, observer));
+        provider = Arc::new(RateLimitedProvider::new(
+            provider,
+            observer,
+            route_model_to_provider,
+        ));
     }
     provider = Arc::new(CountingProvider::new(provider, counter.clone()));
     if let Some(flag) = cancel.clone() {
@@ -410,6 +425,7 @@ pub async fn run_scan(
             root,
             ingest,
             triaged: Vec::new(),
+            triage_errors: Vec::new(),
             findings_by_file: Vec::new(),
             detect_errors: Vec::new(),
             verified: Vec::new(),
@@ -421,7 +437,7 @@ pub async fn run_scan(
     }
 
     // ----- 2. Triage --------------------------------------------------
-    let triaged = triage_many(
+    let (triaged, triage_errors) = triage_many(
         ingest.candidates.clone(),
         provider.clone(),
         &config.triage_model,
@@ -436,8 +452,20 @@ pub async fn run_scan(
     info!(
         total = triaged.len(),
         keepers = to_detect.len(),
+        failed = triage_errors.len(),
         "triage complete"
     );
+    // Emit per-file errored events BEFORE TriageComplete so the UI can show
+    // the badges alongside the bucket assignments without a race.
+    for err in &triage_errors {
+        emit(
+            &events,
+            ScanEvent::TriageFileErrored {
+                rel_path: err.rel_path.clone(),
+                error: err.error.clone(),
+            },
+        );
+    }
     emit(
         &events,
         ScanEvent::TriageComplete {
@@ -462,6 +490,7 @@ pub async fn run_scan(
             root,
             ingest,
             triaged,
+            triage_errors,
             findings_by_file: Vec::new(),
             detect_errors: Vec::new(),
             verified: Vec::new(),
@@ -774,6 +803,7 @@ pub async fn run_scan(
         root,
         ingest,
         triaged,
+        triage_errors,
         findings_by_file,
         detect_errors,
         verified,

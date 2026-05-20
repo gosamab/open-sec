@@ -267,6 +267,7 @@ mod tests {
             root: std::path::PathBuf::from("/p"),
             ingest: WalkResult::default(),
             triaged: Vec::new(),
+            triage_errors: Vec::new(),
             findings_by_file: vec![FileFindings {
                 path: std::path::PathBuf::from("/p/src/app.ts"),
                 rel_path: "src/app.ts".into(),

@@ -127,6 +127,12 @@ impl Store {
             tx.pragma_update(None, "user_version", 5)?;
             tx.commit()?;
         }
+        if current < 6 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(schema::SCHEMA_V6)?;
+            tx.pragma_update(None, "user_version", 6)?;
+            tx.commit()?;
+        }
         Ok(())
     }
 }

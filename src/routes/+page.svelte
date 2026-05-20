@@ -24,6 +24,7 @@
 		getTriageForRoot,
 		regeneratePatch,
 		hasAnthropicKey,
+		hasOpenAiKey,
 		listenScanEvents,
 		loadScan,
 		resumePipeline,
@@ -83,7 +84,8 @@
 
 	// ---------- lifecycle ------------------------------------------------
 	onMount(async () => {
-		scan.keyConfigured = await hasAnthropicKey();
+		const [anthInit, oaiInit] = await Promise.all([hasAnthropicKey(), hasOpenAiKey()]);
+		scan.keyConfigured = anthInit || oaiInit;
 		unlisten = await listenScanEvents((ev) => {
 			switch (ev.kind) {
 				case 'started':
@@ -100,6 +102,17 @@
 					const keepers = ev.triaged.filter((t) => t.result.priority !== 'skip').length;
 					scan.stage = keepers > 0 ? `detecting 0/${keepers} file(s)…` : 'detecting…';
 					break;
+				case 'triage_file_errored': {
+					// Triage failures used to drop silently — a scan whose triage
+					// model truncated mid-call would silently report 0 findings.
+					// Surface alongside detect errors in the same map; the
+					// message already carries the "triage failed:" prefix so the
+					// user can tell which stage broke.
+					const e = new Map(scan.detectErrors);
+					e.set(ev.rel_path, ev.error);
+					scan.detectErrors = e;
+					break;
+				}
 				case 'detect_file_complete': {
 					const next = new Map(scan.findingsByFile);
 					next.set(ev.rel_path, ev.findings);
@@ -203,7 +216,12 @@
 		try {
 			const existing = patchHistoryFor(selectedFinding.id);
 			const priors = existing.map((p) => p.proposal);
-			const newPatch = await regeneratePatch(scan.root, verified, priors);
+			const newPatch = await regeneratePatch(
+				scan.root,
+				verified,
+				priors,
+				settings.value.patch_model
+			);
 			const history = [...existing, newPatch];
 			const histMap = new Map(scan.patchHistoryById);
 			histMap.set(selectedFinding.id, history);
@@ -487,6 +505,7 @@
 		for (const ff of r.findings_by_file) fbf.set(ff.rel_path, ff.findings);
 		scan.findingsByFile = fbf;
 		const errs = new Map<string, string>();
+		for (const e of r.triage_errors ?? []) errs.set(e.rel_path, e.error);
 		for (const e of r.detect_errors ?? []) errs.set(e.rel_path, e.error);
 		scan.detectErrors = errs;
 		const vbi = new Map<string, typeof r.verified[number]['verdict']>();
@@ -537,7 +556,10 @@
 			keepers.every((t) => detectedRels.has(t.candidate.rel_path))
 		)
 			return 2;
-		if (r.triaged.length > 0 && r.ingest.candidates.length === r.triaged.length) return 1;
+		// Triage is done when every candidate ended up either in `triaged` or
+		// in `triage_errors` (the two outcomes triage_many can produce).
+		const triageTotal = r.triaged.length + (r.triage_errors?.length ?? 0);
+		if (triageTotal > 0 && r.ingest.candidates.length === triageTotal) return 1;
 		if (r.ingest.candidates.length > 0) return 0;
 		return -1;
 	}
@@ -580,7 +602,7 @@
 		next.add(rel);
 		scan.retryingFiles = next;
 		try {
-			const findings = await scanFile(absolutePath, scan.root);
+			const findings = await scanFile(absolutePath, scan.root, settings.value.detect_model);
 			const fbf = new Map(scan.findingsByFile);
 			fbf.set(rel, findings);
 			scan.findingsByFile = fbf;
@@ -599,7 +621,8 @@
 	}
 
 	async function refreshKeyState() {
-		scan.keyConfigured = await hasAnthropicKey();
+		const [anth, oai] = await Promise.all([hasAnthropicKey(), hasOpenAiKey()]);
+		scan.keyConfigured = anth || oai;
 	}
 
 	// ---------- derived --------------------------------------------------

@@ -1,11 +1,12 @@
 /**
- * Anthropic price tables and currency conversion helpers.
+ * Per-provider price tables and currency conversion helpers.
  *
- * Prices are USD per million tokens, listed for input, output, prompt-cache
- * write (1-hour TTL — see CLAUDE.md) and cache read. The 1-hour cache write
- * is the base input price × 2; cache reads are × 0.10. We bake those
- * multipliers into the table rather than computing them at call sites so the
- * source of truth stays at the top of this file.
+ * Prices are USD per million tokens. For Claude (Anthropic) we list four
+ * fields: input, output, prompt-cache write (1-hour TTL — see CLAUDE.md) and
+ * cache read. The 1-hour cache write is the base input price × 2; cache reads
+ * are × 0.10. For OpenAI we keep the same shape for uniform call sites; the
+ * `cache_write_1h` field is unused there (OpenAI never bills cache writes —
+ * the backend always emits `cache_creation_input_tokens: 0`).
  *
  * The Saudi riyal is pegged to USD at 3.75 by SAMA, but the rate is exposed
  * as a Setting so the user can override if the peg ever moves.
@@ -17,16 +18,20 @@ export interface ModelPrices {
 	input: number;
 	/** USD per million output tokens. */
 	output: number;
-	/** USD per million tokens written to the 1-hour prompt cache (2 × input). */
+	/** USD per million tokens written to the 1-hour prompt cache (2 × input).
+	 *  Unused on OpenAI models (no cache-write surcharge). */
 	cache_write_1h: number;
-	/** USD per million tokens read from the prompt cache (0.10 × input). */
+	/** USD per million tokens read from the prompt cache. */
 	cache_read: number;
 }
 
-/** Known Claude models and their per-MTok pricing. Keys must match the model
+/** Known models and their per-MTok pricing. Keys must match the model
  *  IDs sent in `ScanConfig` (see settings.svelte.ts defaults). Unknown models
  *  fall through to {@link FALLBACK_PRICES} — a Sonnet-grade placeholder so
- *  estimates stay in the right ballpark even for misspelled or new model IDs. */
+ *  estimates stay in the right ballpark even for misspelled or new model IDs.
+ *
+ *  TODO: gpt-5 family numbers are best-effort and may be stale — verify
+ *  against https://openai.com/api/pricing/ at PR review time. */
 export const MODEL_PRICES: Record<string, ModelPrices> = {
 	'claude-haiku-4-5': {
 		input: 1,
@@ -45,6 +50,24 @@ export const MODEL_PRICES: Record<string, ModelPrices> = {
 		output: 75,
 		cache_write_1h: 30,
 		cache_read: 1.5
+	},
+	'gpt-5': {
+		input: 1.25,
+		output: 10,
+		cache_write_1h: 1.25,
+		cache_read: 0.125
+	},
+	'gpt-5-mini': {
+		input: 0.25,
+		output: 2,
+		cache_write_1h: 0.25,
+		cache_read: 0.025
+	},
+	'gpt-5-nano': {
+		input: 0.05,
+		output: 0.4,
+		cache_write_1h: 0.05,
+		cache_read: 0.005
 	}
 };
 
@@ -64,7 +87,10 @@ export function priceFor(model: string): ModelPrices {
 export const MODEL_THROUGHPUT_TOK_PER_SEC: Record<string, number> = {
 	'claude-haiku-4-5': 150,
 	'claude-sonnet-4-6': 85,
-	'claude-opus-4-7': 55
+	'claude-opus-4-7': 55,
+	'gpt-5': 80,
+	'gpt-5-mini': 130,
+	'gpt-5-nano': 200
 };
 
 export const FALLBACK_THROUGHPUT_TOK_PER_SEC = 85;

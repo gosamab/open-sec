@@ -10,7 +10,7 @@ use crate::scanner::orchestrate::{
     DetectError, FileFindings, ScanResult, ScanStatus, StageDurations, StageUsage,
 };
 use crate::scanner::patch::Patch;
-use crate::scanner::triage::TriagedFile;
+use crate::scanner::triage::{TriageError, TriagedFile};
 use crate::scanner::verify::{Verdict, VerifiedFinding};
 use crate::scanner::Finding;
 
@@ -44,6 +44,7 @@ impl Store {
 
         let walk_json = json::to_string(&result.ingest)?;
         let triaged_json = json::to_string(&result.triaged)?;
+        let triage_errors_json = json::to_string(&result.triage_errors)?;
         let usage_json = json::to_string(&result.usage)?;
         let detect_errors_json = json::to_string(&result.detect_errors)?;
         let durations_json = json::to_string(&result.durations)?;
@@ -63,14 +64,16 @@ impl Store {
         tx.execute(
             "INSERT INTO scans (id, root, started_at, status,
                  total_findings, kept_findings,
-                 walk_json, triaged_json, usage_json, detect_errors_json, durations_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 walk_json, triaged_json, triage_errors_json,
+                 usage_json, detect_errors_json, durations_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                  status = excluded.status,
                  total_findings = excluded.total_findings,
                  kept_findings = excluded.kept_findings,
                  walk_json = excluded.walk_json,
                  triaged_json = excluded.triaged_json,
+                 triage_errors_json = excluded.triage_errors_json,
                  usage_json = excluded.usage_json,
                  detect_errors_json = excluded.detect_errors_json,
                  durations_json = excluded.durations_json",
@@ -83,6 +86,7 @@ impl Store {
                 kept,
                 walk_json,
                 triaged_json,
+                triage_errors_json,
                 usage_json,
                 detect_errors_json,
                 durations_json,
@@ -173,7 +177,8 @@ impl Store {
     pub fn load_scan(&self, scan_id: &str) -> Result<ScanResult> {
         let conn = self.db();
 
-        let (root, walk_json, triaged_json, usage_json, detect_errors_json, durations_json, status_str): (
+        let (root, walk_json, triaged_json, triage_errors_json, usage_json, detect_errors_json, durations_json, status_str): (
+            String,
             String,
             String,
             String,
@@ -183,7 +188,7 @@ impl Store {
             String,
         ) = conn
             .query_row(
-                "SELECT root, walk_json, triaged_json, usage_json, detect_errors_json, durations_json, status FROM scans WHERE id = ?1",
+                "SELECT root, walk_json, triaged_json, triage_errors_json, usage_json, detect_errors_json, durations_json, status FROM scans WHERE id = ?1",
                 params![scan_id],
                 |row| {
                     Ok((
@@ -194,6 +199,7 @@ impl Store {
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -202,6 +208,8 @@ impl Store {
 
         let ingest: WalkResult = json::from_str(&walk_json)?;
         let triaged: Vec<TriagedFile> = json::from_str(&triaged_json)?;
+        let triage_errors: Vec<TriageError> =
+            json::from_str(&triage_errors_json).unwrap_or_default();
         let usage: StageUsage = json::from_str(&usage_json).unwrap_or_default();
         let detect_errors: Vec<DetectError> =
             json::from_str(&detect_errors_json).unwrap_or_default();
@@ -291,6 +299,7 @@ impl Store {
             root: std::path::PathBuf::from(root),
             ingest,
             triaged,
+            triage_errors,
             findings_by_file,
             detect_errors,
             verified,

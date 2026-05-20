@@ -1,6 +1,21 @@
 pub mod anthropic;
 pub mod counting;
+pub mod multiplex;
+pub mod openai;
 pub mod rate_limit;
+
+/// Map a model id to the stable key of the provider that handles it.
+/// `claude-*` → `"anthropic"`, `gpt-*` → `"openai"`. Anything else falls
+/// back to `"anthropic"` so an unknown model still surfaces as an Anthropic
+/// `BadRequest` rather than a routing panic. The multiplex provider is the
+/// authoritative gate — see [`crate::providers::multiplex`].
+pub fn route_model_to_provider(model: &str) -> &'static str {
+    if model.starts_with("gpt-") {
+        "openai"
+    } else {
+        "anthropic"
+    }
+}
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -171,4 +186,56 @@ pub trait Provider: Send + Sync {
 
     /// Run a non-streaming generation. Returns the full assistant message.
     async fn generate(&self, req: GenerationRequest) -> ProviderResult<Response>;
+}
+
+#[cfg(test)]
+pub mod test_support {
+    use serde_json::Value;
+
+    /// Assert a JSON Schema satisfies OpenAI Chat Completions strict-mode
+    /// tool rules: every object schema must set `additionalProperties: false`
+    /// and list every property in `required`. Recurses into `properties.*`
+    /// and `items`. Panics on the first violation with a JSON-path-style
+    /// pointer to the offending node.
+    pub fn assert_openai_strict_compatible(schema: &Value) {
+        walk(schema, "$");
+    }
+
+    fn walk(node: &Value, path: &str) {
+        let Some(obj) = node.as_object() else { return };
+        if is_object_schema(obj.get("type")) {
+            let ap = obj.get("additionalProperties");
+            assert!(
+                matches!(ap, Some(Value::Bool(false))),
+                "object at {path} must set additionalProperties: false (got {ap:?})"
+            );
+            if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+                let required: Vec<&str> = obj
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                for key in props.keys() {
+                    assert!(
+                        required.iter().any(|r| r == key),
+                        "object at {path} omits '{key}' from required (strict mode requires every property)"
+                    );
+                }
+                for (key, sub) in props {
+                    walk(sub, &format!("{path}.{key}"));
+                }
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            walk(items, &format!("{path}[]"));
+        }
+    }
+
+    fn is_object_schema(t: Option<&Value>) -> bool {
+        match t {
+            Some(Value::String(s)) => s == "object",
+            Some(Value::Array(a)) => a.iter().any(|v| v.as_str() == Some("object")),
+            _ => false,
+        }
+    }
 }

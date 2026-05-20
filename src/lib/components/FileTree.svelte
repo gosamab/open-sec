@@ -146,7 +146,7 @@
 						style="padding-left: {0.5 + row.depth * 0.75}rem"
 						onclick={() => onSelectFile(f.path)}
 						title={f.detectError
-							? `detect errored: ${f.detectError}`
+							? f.detectError
 							: f.skipReason
 								? `skipped: ${skipReasonLabel(f.skipReason)}`
 								: f.triageReason

@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::error::{ProviderError, ProviderResult};
-use crate::providers::rate_limit::{RateLimitObserver, RateLimitSnapshot};
+use crate::providers::rate_limit::{MultiObserver, RateLimitSnapshot};
 use crate::providers::{
     ContentBlock, GenerationRequest, Provider, Response, StopReason, Usage,
 };
+
+const PROVIDER_KEY: &str = "anthropic";
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -22,7 +24,7 @@ pub struct AnthropicProvider {
     client: Client,
     /// Where to publish parsed `anthropic-ratelimit-*` headers after each
     /// response. `RateLimitedProvider` reads this to pace upstream calls.
-    observer: Option<Arc<RateLimitObserver>>,
+    observer: Option<Arc<MultiObserver>>,
 }
 
 impl AnthropicProvider {
@@ -45,7 +47,7 @@ impl AnthropicProvider {
         })
     }
 
-    pub fn with_rate_limit_observer(mut self, observer: Arc<RateLimitObserver>) -> Self {
+    pub fn with_rate_limit_observer(mut self, observer: Arc<MultiObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
@@ -155,7 +157,7 @@ impl Provider for AnthropicProvider {
 
         let resp = self.build_request(&body).send().await?;
         if let Some(observer) = &self.observer {
-            observer.record(RateLimitSnapshot::from_headers(resp.headers()));
+            observer.record(PROVIDER_KEY, RateLimitSnapshot::from_anthropic_headers(resp.headers()));
         }
         if !resp.status().is_success() {
             return Err(classify_error(resp).await);

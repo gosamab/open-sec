@@ -162,7 +162,7 @@
 								<path d="m9 18 6-6-6-6" />
 							</svg>
 							<span class="truncate text-xs font-medium text-destructive">
-								Detect errors ({detectErrors.size})
+								Scan errors ({detectErrors.size})
 							</span>
 						</div>
 						<div class="flex shrink-0 items-center gap-2">
@@ -176,7 +176,7 @@
 									e.stopPropagation();
 									onRetryAll();
 								}}
-								title="Re-run detect on every errored file"
+								title="Re-run detect on every errored file (skips triage)"
 							>
 								{#if retryingAll}
 									<svg
@@ -295,7 +295,7 @@
 						>{/if}
 				</dd>
 				{#if detectErrors.size > 0}
-					<dt class="py-0.5 text-destructive">Detect errors</dt>
+					<dt class="py-0.5 text-destructive">Scan errors</dt>
 					<dd class="py-0.5 text-right font-mono text-destructive tabular-nums">
 						{detectErrors.size}
 					</dd>

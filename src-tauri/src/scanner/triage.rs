@@ -43,6 +43,16 @@ pub struct TriagedFile {
     pub result: TriageResult,
 }
 
+/// Per-file triage failure. Captured (instead of dropped) so the UI can show
+/// the user that this file silently fell out of the pipeline — otherwise a
+/// triage-failed file would just be absent from the result and the scan
+/// would look "clean" when it wasn't.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageError {
+    pub rel_path: String,
+    pub error: String,
+}
+
 const TRIAGE_PROMPT: &str = r#"You are a fast triage filter for a security code-review pipeline. Your job
 is to BUCKET each file into one of four priorities so the expensive detection
 stage focuses on code most likely to contain real vulnerabilities.
@@ -103,6 +113,7 @@ fn submit_triage_tool() -> Tool {
         description: "Submit your triage bucket for the file.".to_string(),
         input_schema: json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "priority": { "type": "string", "enum": ["high", "normal", "low", "skip"] },
                 "reason":   { "type": "string", "description": "Short justification (<= 200 chars)." }
@@ -154,56 +165,90 @@ pub async fn triage_one(
     serde_json::from_value(input.clone()).context("submit_triage input did not match schema")
 }
 
-/// Triage every candidate in parallel under a semaphore. Errors on individual
-/// files are logged and the file is dropped from the result; we don't fail the
-/// whole scan because one file's triage call hiccupped.
+/// One outcome from a triage attempt: a successful bucket assignment OR a
+/// captured error. Both are surfaced to the orchestrator so failing files
+/// can be shown in the UI instead of silently disappearing.
+enum TriageOutcome {
+    Ok(TriagedFile),
+    Err(TriageError),
+}
+
+/// Triage every candidate in parallel under a semaphore. Returns successful
+/// bucket assignments alongside per-file errors; the orchestrator emits and
+/// persists both so a triage failure doesn't silently turn into a "clean"
+/// scan.
 pub async fn triage_many(
     candidates: Vec<Candidate>,
     provider: Arc<dyn Provider>,
     model: &str,
     concurrency: usize,
-) -> Vec<TriagedFile> {
+) -> (Vec<TriagedFile>, Vec<TriageError>) {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let model = model.to_string();
-    let mut set: JoinSet<Option<TriagedFile>> = JoinSet::new();
+    let mut set: JoinSet<TriageOutcome> = JoinSet::new();
 
     for candidate in candidates {
         let permits = permits.clone();
         let provider = provider.clone();
         let model = model.clone();
         set.spawn(async move {
-            let _permit = permits.acquire_owned().await.ok()?;
+            let _permit = match permits.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    return TriageOutcome::Err(TriageError {
+                        rel_path: candidate.rel_path,
+                        error: format!("triage failed: semaphore closed: {e}"),
+                    });
+                }
+            };
             let source = match tokio::fs::read_to_string(&candidate.path).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!(path = %candidate.rel_path, error = %e, "skipping: read failed");
-                    return None;
+                    warn!(path = %candidate.rel_path, error = %e, "triage skipped: read failed");
+                    return TriageOutcome::Err(TriageError {
+                        rel_path: candidate.rel_path,
+                        error: format!("triage failed: read error: {e}"),
+                    });
                 }
             };
             match triage_one(&candidate.rel_path, &source, provider.as_ref(), &model).await {
-                Ok(result) => Some(TriagedFile { candidate, result }),
+                Ok(result) => TriageOutcome::Ok(TriagedFile { candidate, result }),
                 Err(e) => {
-                    warn!(path = %candidate.rel_path, error = %e, "triage call failed");
-                    None
+                    warn!(path = %candidate.rel_path, error = %format!("{e:#}"), "triage call failed");
+                    TriageOutcome::Err(TriageError {
+                        rel_path: candidate.rel_path,
+                        error: format!("triage failed: {e:#}"),
+                    })
                 }
             }
         });
     }
 
-    let mut out = Vec::new();
+    let mut triaged = Vec::new();
+    let mut errors = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok(Some(t)) = joined {
-            out.push(t);
+        match joined {
+            Ok(TriageOutcome::Ok(t)) => triaged.push(t),
+            Ok(TriageOutcome::Err(e)) => errors.push(e),
+            Err(join_err) => {
+                // JoinError (panic / cancelled task) — surface a generic
+                // entry rather than swallowing it.
+                errors.push(TriageError {
+                    rel_path: String::from("<unknown>"),
+                    error: format!("triage task panicked: {join_err}"),
+                });
+            }
         }
     }
     // Stable ordering by priority bucket then path, so downstream queue order
     // is deterministic.
-    out.sort_by(|a, b| {
+    triaged.sort_by(|a, b| {
         priority_rank(a.result.priority)
             .cmp(&priority_rank(b.result.priority))
             .then_with(|| a.candidate.rel_path.cmp(&b.candidate.rel_path))
     });
-    out
+    errors.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    (triaged, errors)
 }
 
 fn priority_rank(p: Priority) -> u8 {
@@ -254,6 +299,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn submit_triage_tool_is_openai_strict_compatible() {
+        crate::providers::test_support::assert_openai_strict_compatible(
+            &submit_triage_tool().input_schema,
+        );
+    }
+
     #[tokio::test]
     async fn triage_one_parses_bucket_and_reason() {
         let provider = FixedProvider::new(
@@ -280,14 +332,73 @@ mod tests {
             }
         };
         let provider = Arc::new(FixedProvider::new(json!({"priority":"normal","reason":"ok"})));
-        let out = triage_many(
+        let (out, errs) = triage_many(
             vec![mk("z.ts"), mk("a.ts"), mk("m.ts")],
             Arc::clone(&provider) as Arc<dyn Provider>,
             "fixed",
             4,
         )
         .await;
+        assert!(errs.is_empty());
         let names: Vec<_> = out.iter().map(|t| t.candidate.rel_path.clone()).collect();
         assert_eq!(names, vec!["a.ts", "m.ts", "z.ts"]);
+    }
+
+    /// Provider that always returns the WRONG tool name, simulating the
+    /// failure mode that originally surfaced this bug: gpt-5 truncated by
+    /// max_completion_tokens returns no submit_triage tool_use → triage_one
+    /// errors → file previously dropped silently. The new contract captures
+    /// the error per file.
+    struct ErroringProvider;
+
+    #[async_trait]
+    impl Provider for ErroringProvider {
+        fn name(&self) -> &'static str {
+            "erroring"
+        }
+        async fn generate(&self, _req: GenerationRequest) -> ProviderResult<Response> {
+            Ok(Response {
+                id: "msg".into(),
+                model: "erroring".into(),
+                content: Vec::new(),
+                stop_reason: Some(StopReason::MaxTokens),
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn triage_many_captures_per_file_errors_instead_of_dropping() {
+        let tmp = TempDir::new().unwrap();
+        let mk = |name: &str| {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, b"x").unwrap();
+            Candidate {
+                path: p,
+                rel_path: name.to_string(),
+                size_bytes: 1,
+                line_count: 1,
+            }
+        };
+        let provider = Arc::new(ErroringProvider);
+        let (out, errs) = triage_many(
+            vec![mk("a.ts"), mk("b.ts")],
+            Arc::clone(&provider) as Arc<dyn Provider>,
+            "erroring",
+            2,
+        )
+        .await;
+        assert!(out.is_empty(), "all files failed triage");
+        assert_eq!(errs.len(), 2, "errors are captured, not dropped");
+        let names: Vec<_> = errs.iter().map(|e| e.rel_path.clone()).collect();
+        assert_eq!(names, vec!["a.ts", "b.ts"], "errors sorted by rel_path");
+        for e in &errs {
+            assert!(
+                e.error.starts_with("triage failed:"),
+                "error message carries stage prefix: {}",
+                e.error
+            );
+        }
     }
 }

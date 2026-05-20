@@ -99,7 +99,7 @@ threaded in — the resolver does not re-canonicalize it per call.
 
 SQLite via `rusqlite` (bundled, no `tauri-plugin-sql`) at
 `<app_data_dir>/open-sec.db`. Schema migrated forward via PRAGMA
-`user_version`; current version is 5. Complex per-finding payloads
+`user_version`; current version is 6. Complex per-finding payloads
 (`Verdict`, `Patch`) live in JSON columns because they're always read with
 their `Finding` and never queried internally.
 

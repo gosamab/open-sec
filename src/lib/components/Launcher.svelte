@@ -7,6 +7,7 @@
 	import {
 		deleteScansForRoot,
 		hasAnthropicKey,
+		hasOpenAiKey,
 		listenScanEvents,
 		listScanGroups,
 		type ScanGroup
@@ -28,7 +29,8 @@
 	let unlisten: UnlistenFn | null = null;
 
 	onMount(async () => {
-		keyConfigured = await hasAnthropicKey();
+		const [anth, oai] = await Promise.all([hasAnthropicKey(), hasOpenAiKey()]);
+		keyConfigured = anth || oai;
 		await reloadGroups();
 		// A scan started from this Launcher session keeps running in the
 		// background after the user goes back here — `run_pipeline` only
@@ -123,7 +125,8 @@
 	}
 
 	async function refreshKeyState() {
-		keyConfigured = await hasAnthropicKey();
+		const [anth, oai] = await Promise.all([hasAnthropicKey(), hasOpenAiKey()]);
+		keyConfigured = anth || oai;
 	}
 </script>
 

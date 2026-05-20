@@ -128,6 +128,7 @@ fn submit_patch_tool() -> Tool {
             .to_string(),
         input_schema: json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "file":        { "type": "string", "description": "Repeat the finding's file path verbatim." },
                 "anchor_line": { "type": "integer", "minimum": 1, "description": "1-indexed line where the change starts." },

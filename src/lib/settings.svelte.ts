@@ -58,6 +58,28 @@ function save(s: ScanSettings) {
 	}
 }
 
+/** Provider-grouped model presets for the Settings dropdown. The order
+ *  matters — within each group the first entry is the most capable model.
+ *  The Settings dropdown renders each group as an `<optgroup>` and falls
+ *  back to a free-text "Custom" input for anything not listed. */
+export interface ModelOption {
+	id: string;
+	label: string;
+}
+
+export const MODEL_OPTIONS: Record<'Anthropic' | 'OpenAI', readonly ModelOption[]> = {
+	Anthropic: [
+		{ id: 'claude-opus-4-7', label: 'Opus 4.7 — most thorough, slowest' },
+		{ id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
+		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 — fastest, cheapest' }
+	],
+	OpenAI: [
+		{ id: 'gpt-5', label: 'GPT-5 — flagship' },
+		{ id: 'gpt-5-mini', label: 'GPT-5 mini — balanced' },
+		{ id: 'gpt-5-nano', label: 'GPT-5 nano — fastest, cheapest' }
+	]
+} as const;
+
 /** Concurrency bounds. Exported so the Settings UI uses the same min/max
  *  values as the clamp logic — keeps them from drifting. */
 export const CONCURRENCY_BOUNDS: Record<

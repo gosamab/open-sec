@@ -5,6 +5,64 @@ All notable changes to Open Security are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-20
+
+### Added
+
+- **OpenAI provider (gpt-5 family).** Full Chat Completions integration
+  behind the same `Provider` trait as Anthropic, with content-block ↔ flat
+  Chat Completions message translation, strict-mode JSON schema on
+  `submit_*` tools, automatic cache-token accounting (read from
+  `prompt_tokens_details.cached_tokens`), and OpenAI rate-limit header
+  parsing. `temperature` is dropped on the wire for gpt-5; `reasoning_effort`
+  is pinned to `"minimal"` so per-stage token budgets (sized for Anthropic
+  output-only) aren't eaten by reasoning before the tool call lands.
+- **Multiplex provider.** Each stage's model id is routed to the right
+  provider via prefix (`gpt-*` → OpenAI, default Anthropic), so a single
+  scan can mix providers per stage (e.g. Haiku triage + gpt-5 detect). A
+  fail-fast gate reports a clear error if the stage's required key isn't
+  configured.
+- **Multi-provider rate-limit pacing.** The proactive pacing decorator now
+  reads a `MultiObserver` keyed by provider, so an Anthropic exhaust
+  doesn't pause OpenAI calls (or vice-versa). OpenAI's
+  `x-ratelimit-{requests,tokens}-{remaining,reset}` headers are parsed
+  with the same logic as Anthropic's `anthropic-ratelimit-*`.
+- **OpenAI key management.** Stored at `<app_data_dir>/openai-api-key`
+  with 0600 perms (mirrors the Anthropic key). New `has_openai_key` /
+  `set_openai_key` commands; the API-key prompt and Settings panel handle
+  both keys.
+- **gpt-5 / gpt-5-mini / gpt-5-nano in the model preset selector**, plus
+  pricing tables in the pre-scan cost estimator (USD per MTok, with
+  cache-read accounting; OpenAI never bills cache writes so the
+  cache-write field is unused on those rows).
+
+### Fixed
+
+- **Triage failures no longer silently drop files.** A triage call that
+  errored (model truncation, read error, task panic) used to be
+  `warn!`-logged and the file would just be absent from the result — a
+  broken scan looked "clean" because every candidate fell out of the
+  pipeline before detect ever ran. Now captured as `triage_errors` on
+  `ScanResult`, emitted as `TriageFileErrored` events, persisted via
+  schema V6, and surfaced in the UI as red "Scan errors" badges
+  alongside detect errors. Each message carries a `"triage failed:"`
+  prefix so the stage that broke is visible.
+- **gpt-5 length-truncation now surfaces as a real error.** A response
+  with `finish_reason: "length"` and empty content used to propagate
+  upstream as the misleading "model didn't call the tool" — now mapped
+  to a `BadRequest` whose message names the reasoning-budget culprit.
+- Shiki integration uses a dynamic import for the highlighter, fixing a
+  cold-start path that broke after a dependency bump.
+
+### Changed
+
+- DB schema bumped to user_version 6 (adds `triage_errors_json` to the
+  `scans` table; default `'[]'` so existing rows load cleanly).
+- CI: GitHub Actions bumped off Node-20-deprecated versions onto
+  Node-24-capable ones.
+
+[1.2.0]: https://github.com/gosamab/open-sec/releases/tag/v1.2.0
+
 ## [1.1.0] — 2026-05-19
 
 ### Added
